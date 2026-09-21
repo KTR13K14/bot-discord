@@ -39,11 +39,11 @@ const client = new Client({
 });
 
 // ==================================================
-// MISTRAL
+// GROQ
 // ==================================================
 
-const MISTRAL_MODEL = 'mistral-small-latest';
-const MISTRAL_VISION_MODEL = 'mistral-small-2506';
+const GROQ_MODEL = 'openai/gpt-oss-120b';
+const GROQ_VISION_MODEL = 'qwen/qwen3.8-27b';
 
 // ==================================================
 // CONFIG
@@ -485,6 +485,10 @@ Nom Discord de l'utilisateur : ${userName}`;
 
     if (!response.ok) {
         const detail = data?.error?.message || `HTTP ${response.status}`;
+        const retryAfter = response.headers.get('retry-after');
+        if (response.status === 429) {
+            throw new Error(`Groq API 429: limite atteinte${retryAfter ? ` — réessaie dans ${retryAfter}s` : ''}.`);
+        }
         throw new Error(`Groq API ${response.status}: ${detail}`);
     }
 
@@ -803,21 +807,6 @@ const commands = [
                     .setRequired(false)
         ),
 
-
-    new SlashCommandBuilder()
-        .setName('message')
-        .setDescription(
-            'Fait envoyer un message par le bot'
-        )
-        .addStringOption(
-            option =>
-                option
-                    .setName('texte')
-                    .setDescription(
-                        'Message à envoyer'
-                    )
-                    .setRequired(true)
-        ),
 
     new SlashCommandBuilder()
         .setName('message')
@@ -1154,13 +1143,13 @@ client.once(
             `🔢 Compteur sauvegardé : ${count}`
         );
 
-        if (!process.env.MISTRAL_API_KEY) {
+        if (!process.env.GROQ_API_KEY) {
             console.log(
-                '⚠️ MISTRAL_API_KEY absent : /ia ne fonctionnera pas.'
+                '⚠️ GROQ_API_KEY absent : /ia ne fonctionnera pas.'
             );
         } else {
             console.log(
-                '🤖 IA Mistral activée.'
+                '🤖 IA Groq activée.'
             );
         }
     }
@@ -1197,7 +1186,7 @@ client.on(
             return;
         }
 
-        if (!process.env.MISTRAL_API_KEY) {
+        if (!process.env.GROQ_API_KEY) {
             return;
         }
 
@@ -1302,39 +1291,6 @@ client.on(
             }
 
             // ==========================================
-            // /MESSAGE
-            // ==========================================
-
-            if (interaction.commandName === 'message') {
-                const texte = interaction.options.getString('texte');
-
-                try {
-                    await interaction.channel.send({
-                        content: texte,
-                        allowedMentions: {
-                            parse: ['everyone', 'users', 'roles']
-                        }
-                    });
-
-                    await interaction.reply({
-                        content: '✅ Message envoyé.',
-                        flags: MessageFlags.Ephemeral
-                    });
-                } catch (error) {
-                    console.error('❌ Erreur /message :', error);
-
-                    if (!interaction.replied && !interaction.deferred) {
-                        await interaction.reply({
-                            content: '❌ Impossible d’envoyer le message.',
-                            flags: MessageFlags.Ephemeral
-                        });
-                    }
-                }
-
-                return;
-            }
-
-            // ==========================================
             // /IA
             // ==========================================
 
@@ -1343,10 +1299,10 @@ client.on(
                 'ia'
             ) {
 
-                if (!process.env.MISTRAL_API_KEY) {
+                if (!process.env.GROQ_API_KEY) {
                     await interaction.reply({
                         content:
-                            '❌ La clé Mistral n’est pas configurée dans `.env`.',
+                            '❌ La clé Groq n’est pas configurée dans `.env`.',
                         flags:
                             MessageFlags.Ephemeral
                     });
@@ -1828,7 +1784,7 @@ client.on(
                                     name:
                                         '🤖 IA',
                                     value:
-                                        process.env.MISTRAL_API_KEY
+                                        process.env.GROQ_API_KEY
                                             ? 'Activée'
                                             : 'Non configurée'
                                 }
@@ -2830,9 +2786,9 @@ if (!process.env.TOKEN) {
     process.exit(1);
 }
 
-if (!process.env.MISTRAL_API_KEY) {
+if (!process.env.GROQ_API_KEY) {
     console.warn(
-        '⚠️ MISTRAL_API_KEY absent. Le bot démarrera, mais /ia sera désactivé.'
+        '⚠️ GROQ_API_KEY absent. Le bot démarrera, mais /ia sera désactivé.'
     );
 }
 
