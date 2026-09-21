@@ -23,7 +23,7 @@ const {
     getVoiceConnection
 } = require('@discordjs/voice');
 
-const OpenAI = require('openai');
+const { GoogleGenAI } = require('@google/genai');
 
 // ==================================================
 // CLIENT
@@ -39,12 +39,16 @@ const client = new Client({
 });
 
 // ==================================================
-// OPENAI
+// GEMINI
 // ==================================================
 
-const openai = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY
-});
+const GEMINI_MODEL = 'gemini-2.5-flash';
+
+const gemini = process.env.GEMINI_API_KEY
+    ? new GoogleGenAI({
+        apiKey: process.env.GEMINI_API_KEY
+    })
+    : null;
 
 // ==================================================
 // CONFIG
@@ -434,6 +438,10 @@ async function askAI(
     userName,
     imageUrls = []
 ) {
+    if (!gemini) {
+        throw new Error('GEMINI_API_KEY absente.');
+    }
+
     const history =
         getHistory(channelId);
 
@@ -472,62 +480,125 @@ Tu peux utiliser des emojis avec modération.
 Nom Discord de l'utilisateur : ${userName}
 `;
 
-    const currentContent = [];
+    const contents = history.map(item => ({
+        role: item.role === 'assistant' ? 'model' : 'user',
+        parts: [
+            {
+                text: typeof item.content === 'string'
+                    ? item.content
+                    : '[Image envoyée précédemment]'
+            }
+        ]
+    }));
+
+    const currentParts = [];
 
     if (question?.trim()) {
-        currentContent.push({
-            type: 'input_text',
-            text: question
+        currentParts.push({
+            text: question.trim()
+        });
+    } else if (imageUrls.length) {
+        currentParts.push({
+            text: 'Analyse cette image.'
         });
     }
 
+    // Gemini accepte les images inline en base64.
+    // On limite à 5 images et à 4 Mo par image pour éviter
+    // les requêtes Discord/Gemini trop volumineuses.
     for (const imageUrl of imageUrls.slice(0, 5)) {
-        currentContent.push({
-            type: 'input_image',
-            image_url: imageUrl,
-            detail: 'auto'
-        });
+        try {
+            const imageResponse =
+                await fetch(imageUrl);
+
+            if (!imageResponse.ok) {
+                console.warn(
+                    `⚠️ Image inaccessible (${imageResponse.status}) : ${imageUrl}`
+                );
+                continue;
+            }
+
+            const contentLength =
+                Number(
+                    imageResponse.headers.get('content-length') ||
+                    0
+                );
+
+            if (contentLength > 4 * 1024 * 1024) {
+                console.warn(
+                    '⚠️ Image ignorée : plus de 4 Mo.'
+                );
+                continue;
+            }
+
+            const arrayBuffer =
+                await imageResponse.arrayBuffer();
+
+            if (arrayBuffer.byteLength > 4 * 1024 * 1024) {
+                console.warn(
+                    '⚠️ Image ignorée : plus de 4 Mo.'
+                );
+                continue;
+            }
+
+            const mimeType =
+                (
+                    imageResponse.headers.get('content-type') ||
+                    'image/jpeg'
+                ).split(';')[0];
+
+            if (!mimeType.startsWith('image/')) {
+                console.warn(
+                    `⚠️ Fichier ignoré : ${mimeType}`
+                );
+                continue;
+            }
+
+            currentParts.push({
+                inlineData: {
+                    mimeType,
+                    data: Buffer.from(arrayBuffer).toString('base64')
+                }
+            });
+        } catch (error) {
+            console.error(
+                '❌ Impossible de récupérer une image :',
+                error
+            );
+        }
     }
 
-    const input = [
-        {
-            role: 'system',
-            content: systemPrompt
-        },
-        ...history,
-        {
-            role: 'user',
-            content: currentContent.length === 1 &&
-                currentContent[0].type === 'input_text'
-                ? currentContent[0].text
-                : currentContent
-        }
-    ];
+    contents.push({
+        role: 'user',
+        parts: currentParts.length
+            ? currentParts
+            : [{ text: question || 'Bonjour.' }]
+    });
 
     const response =
-        await openai.responses.create({
-            model: 'gpt-5.6-luna',
-            input
+        await gemini.models.generateContent({
+            model: GEMINI_MODEL,
+            contents,
+            config: {
+                systemInstruction: systemPrompt
+            }
         });
 
     const answer =
-        response.output_text?.trim();
+        response.text?.trim();
 
     if (!answer) {
         throw new Error(
-            'Réponse IA vide.'
+            'Réponse Gemini vide.'
         );
     }
-
-    const historyContent =
-        imageUrls.length > 0
-            ? currentContent
-            : question;
 
     addHistory(
         channelId,
         'user',
-        historyContent
+        imageUrls.length > 0
+            ? `${question || 'Analyse cette image.'}\n[Image envoyée]`
+            : question
     );
 
     addHistory(
@@ -1164,13 +1235,13 @@ client.once(
             `🔢 Compteur sauvegardé : ${count}`
         );
 
-        if (!process.env.OPENAI_API_KEY) {
+        if (!process.env.GEMINI_API_KEY) {
             console.log(
-                '⚠️ OPENAI_API_KEY absent : /ia ne fonctionnera pas.'
+                '⚠️ GEMINI_API_KEY absent : /ia ne fonctionnera pas.'
             );
         } else {
             console.log(
-                '🤖 IA activée.'
+                '🤖 IA Gemini activée.'
             );
         }
     }
@@ -1207,7 +1278,7 @@ client.on(
             return;
         }
 
-        if (!process.env.OPENAI_API_KEY) {
+        if (!process.env.GEMINI_API_KEY) {
             return;
         }
 
@@ -1320,10 +1391,10 @@ client.on(
                 'ia'
             ) {
 
-                if (!process.env.OPENAI_API_KEY) {
+                if (!process.env.GEMINI_API_KEY) {
                     await interaction.reply({
                         content:
-                            '❌ La clé OpenAI n’est pas configurée dans `.env`.',
+                            '❌ La clé Gemini n’est pas configurée dans `.env`.',
                         flags:
                             MessageFlags.Ephemeral
                     });
@@ -1745,7 +1816,7 @@ client.on(
                                     name:
                                         '🤖 IA',
                                     value:
-                                        process.env.OPENAI_API_KEY
+                                        process.env.GEMINI_API_KEY
                                             ? 'Activée'
                                             : 'Non configurée'
                                 }
@@ -2747,9 +2818,9 @@ if (!process.env.TOKEN) {
     process.exit(1);
 }
 
-if (!process.env.OPENAI_API_KEY) {
+if (!process.env.GEMINI_API_KEY) {
     console.warn(
-        '⚠️ OPENAI_API_KEY absent. Le bot démarrera, mais /ia sera désactivé.'
+        '⚠️ GEMINI_API_KEY absent. Le bot démarrera, mais /ia sera désactivé.'
     );
 }
 
