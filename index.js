@@ -23,7 +23,7 @@ const {
     getVoiceConnection
 } = require('@discordjs/voice');
 
-const { GoogleGenAI } = require('@google/genai');
+
 
 // ==================================================
 // CLIENT
@@ -39,16 +39,11 @@ const client = new Client({
 });
 
 // ==================================================
-// GEMINI
+// MISTRAL
 // ==================================================
 
-const GEMINI_MODEL = 'gemini-3.6-flash';
-
-const gemini = process.env.GEMINI_API_KEY
-    ? new GoogleGenAI({
-        apiKey: process.env.GEMINI_API_KEY
-    })
-    : null;
+const MISTRAL_MODEL = 'mistral-small-latest';
+const MISTRAL_VISION_MODEL = 'mistral-small-2506';
 
 // ==================================================
 // CONFIG
@@ -438,12 +433,13 @@ async function askAI(
     userName,
     imageUrls = []
 ) {
-    if (!gemini) {
-        throw new Error('GEMINI_API_KEY absente.');
+    const apiKey = process.env.MISTRAL_API_KEY;
+
+    if (!apiKey) {
+        throw new Error('MISTRAL_API_KEY absente.');
     }
 
-    const history =
-        getHistory(channelId);
+    const history = getHistory(channelId);
 
     const systemPrompt = `
 Tu es KTR.BOT, un assistant IA intégré à Discord.
@@ -459,12 +455,11 @@ Tu aides notamment pour :
 - jeux vidéo
 - questions générales
 
-Tu peux analyser les images envoyées par l'utilisateur.
 Quand une image est fournie :
 - regarde attentivement son contenu
-- décris ce qui est réellement visible
+- décris uniquement ce qui est réellement visible
 - lis le texte visible quand c'est possible
-- utilise l'image pour répondre à la question de l'utilisateur
+- utilise l'image pour répondre à la question
 - ne prétends pas voir quelque chose qui n'est pas clairement visible
 
 Quand tu fournis du code :
@@ -480,117 +475,104 @@ Tu peux utiliser des emojis avec modération.
 Nom Discord de l'utilisateur : ${userName}
 `;
 
-    const contents = history.map(item => ({
-        role: item.role === 'assistant' ? 'model' : 'user',
-        parts: [
-            {
-                text: typeof item.content === 'string'
-                    ? item.content
-                    : '[Image envoyée précédemment]'
-            }
-        ]
-    }));
+    const messages = [
+        {
+            role: 'system',
+            content: systemPrompt
+        },
+        ...history.map(item => ({
+            role: item.role === 'assistant' ? 'assistant' : 'user',
+            content: typeof item.content === 'string'
+                ? item.content
+                : '[Image envoyée précédemment]'
+        }))
+    ];
 
-    const currentParts = [];
+    let currentMessage;
 
-    if (question?.trim()) {
-        currentParts.push({
-            text: question.trim()
-        });
-    } else if (imageUrls.length) {
-        currentParts.push({
-            text: 'Analyse cette image.'
-        });
-    }
+    if (imageUrls.length > 0) {
+        const content = [];
 
-    // Gemini accepte les images inline en base64.
-    // On limite à 5 images et à 4 Mo par image pour éviter
-    // les requêtes Discord/Gemini trop volumineuses.
-    for (const imageUrl of imageUrls.slice(0, 5)) {
-        try {
-            const imageResponse =
-                await fetch(imageUrl);
+        if (question?.trim()) {
+            content.push({
+                type: 'text',
+                text: question.trim()
+            });
+        } else {
+            content.push({
+                type: 'text',
+                text: 'Analyse cette image.'
+            });
+        }
 
-            if (!imageResponse.ok) {
-                console.warn(
-                    `⚠️ Image inaccessible (${imageResponse.status}) : ${imageUrl}`
-                );
-                continue;
-            }
-
-            const contentLength =
-                Number(
-                    imageResponse.headers.get('content-length') ||
-                    0
-                );
-
-            if (contentLength > 4 * 1024 * 1024) {
-                console.warn(
-                    '⚠️ Image ignorée : plus de 4 Mo.'
-                );
-                continue;
-            }
-
-            const arrayBuffer =
-                await imageResponse.arrayBuffer();
-
-            if (arrayBuffer.byteLength > 4 * 1024 * 1024) {
-                console.warn(
-                    '⚠️ Image ignorée : plus de 4 Mo.'
-                );
-                continue;
-            }
-
-            const mimeType =
-                (
-                    imageResponse.headers.get('content-type') ||
-                    'image/jpeg'
-                ).split(';')[0];
-
-            if (!mimeType.startsWith('image/')) {
-                console.warn(
-                    `⚠️ Fichier ignoré : ${mimeType}`
-                );
-                continue;
-            }
-
-            currentParts.push({
-                inlineData: {
-                    mimeType,
-                    data: Buffer.from(arrayBuffer).toString('base64')
+        for (const imageUrl of imageUrls.slice(0, 5)) {
+            content.push({
+                type: 'image_url',
+                image_url: {
+                    url: imageUrl
                 }
             });
-        } catch (error) {
-            console.error(
-                '❌ Impossible de récupérer une image :',
-                error
-            );
         }
+
+        currentMessage = {
+            role: 'user',
+            content
+        };
+    } else {
+        currentMessage = {
+            role: 'user',
+            content: question?.trim() || 'Bonjour.'
+        };
     }
 
-    contents.push({
-        role: 'user',
-        parts: currentParts.length
-            ? currentParts
-            : [{ text: question || 'Bonjour.' }]
-    });
+    messages.push(currentMessage);
 
-    const response =
-        await gemini.models.generateContent({
-            model: GEMINI_MODEL,
-            contents,
-            config: {
-                systemInstruction: systemPrompt
-            }
-        });
+    const model = imageUrls.length > 0
+        ? MISTRAL_VISION_MODEL
+        : MISTRAL_MODEL;
 
-    const answer =
-        response.text?.trim();
+    const response = await fetch(
+        'https://api.mistral.ai/v1/chat/completions',
+        {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${apiKey}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                model,
+                messages,
+                temperature: 0.7,
+                max_tokens: 2048
+            })
+        }
+    );
+
+    const data = await response.json().catch(() => null);
+
+    if (!response.ok) {
+        const detail =
+            data?.message ||
+            data?.error?.message ||
+            `HTTP ${response.status}`;
+
+        throw new Error(`Mistral API ${response.status}: ${detail}`);
+    }
+
+    const rawAnswer =
+        data?.choices?.[0]?.message?.content;
+
+    const answer = typeof rawAnswer === 'string'
+        ? rawAnswer.trim()
+        : Array.isArray(rawAnswer)
+            ? rawAnswer
+                .map(part => part?.text || '')
+                .join('')
+                .trim()
+            : '';
 
     if (!answer) {
-        throw new Error(
-            'Réponse Gemini vide.'
-        );
+        throw new Error('Réponse Mistral vide.');
     }
 
     addHistory(
@@ -908,21 +890,6 @@ const commands = [
                         'Image à analyser (optionnel)'
                     )
                     .setRequired(false)
-        ),
-
-    new SlashCommandBuilder()
-        .setName('message')
-        .setDescription(
-            'Fait envoyer un message par le bot'
-        )
-        .addStringOption(
-            option =>
-                option
-                    .setName('texte')
-                    .setDescription(
-                        'Message à envoyer'
-                    )
-                    .setRequired(true)
         ),
 
     new SlashCommandBuilder()
@@ -1250,13 +1217,13 @@ client.once(
             `🔢 Compteur sauvegardé : ${count}`
         );
 
-        if (!process.env.GEMINI_API_KEY) {
+        if (!process.env.MISTRAL_API_KEY) {
             console.log(
-                '⚠️ GEMINI_API_KEY absent : /ia ne fonctionnera pas.'
+                '⚠️ MISTRAL_API_KEY absent : /ia ne fonctionnera pas.'
             );
         } else {
             console.log(
-                '🤖 IA Gemini activée.'
+                '🤖 IA Mistral activée.'
             );
         }
     }
@@ -1293,7 +1260,7 @@ client.on(
             return;
         }
 
-        if (!process.env.GEMINI_API_KEY) {
+        if (!process.env.MISTRAL_API_KEY) {
             return;
         }
 
@@ -1406,10 +1373,10 @@ client.on(
                 'ia'
             ) {
 
-                if (!process.env.GEMINI_API_KEY) {
+                if (!process.env.MISTRAL_API_KEY) {
                     await interaction.reply({
                         content:
-                            '❌ La clé Gemini n’est pas configurée dans `.env`.',
+                            '❌ La clé Mistral n’est pas configurée dans `.env`.',
                         flags:
                             MessageFlags.Ephemeral
                     });
@@ -1831,7 +1798,7 @@ client.on(
                                     name:
                                         '🤖 IA',
                                     value:
-                                        process.env.GEMINI_API_KEY
+                                        process.env.MISTRAL_API_KEY
                                             ? 'Activée'
                                             : 'Non configurée'
                                 }
@@ -2306,44 +2273,6 @@ client.on(
                         '✅ Panneau envoyé.',
                     flags:
                         MessageFlags.Ephemeral
-                });
-
-                return;
-            }
-
-            // ==========================================
-            // /message
-            // ==========================================
-
-            if (
-                interaction.commandName ===
-                'message'
-            ) {
-
-                const text =
-                    interaction.options.getString(
-                        'texte',
-                        true
-                    );
-
-                if (!interaction.channel || !interaction.channel.isTextBased()) {
-                    await interaction.reply({
-                        content: '❌ Ce salon ne permet pas d’envoyer des messages.',
-                        flags: MessageFlags.Ephemeral
-                    });
-                    return;
-                }
-
-                await interaction.channel.send({
-                    content: text,
-                    allowedMentions: {
-                        parse: ['everyone', 'users', 'roles']
-                    }
-                });
-
-                await interaction.reply({
-                    content: '✅ Message envoyé.',
-                    flags: MessageFlags.Ephemeral
                 });
 
                 return;
@@ -2871,9 +2800,9 @@ if (!process.env.TOKEN) {
     process.exit(1);
 }
 
-if (!process.env.GEMINI_API_KEY) {
+if (!process.env.MISTRAL_API_KEY) {
     console.warn(
-        '⚠️ GEMINI_API_KEY absent. Le bot démarrera, mais /ia sera désactivé.'
+        '⚠️ MISTRAL_API_KEY absent. Le bot démarrera, mais /ia sera désactivé.'
     );
 }
 
