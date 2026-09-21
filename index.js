@@ -1078,22 +1078,12 @@ client.once(
         );
 
         client.user.setPresence({
-            activities: [
-                {
-                    name: 'Site du bot 🌐',
-                    type: 1,
-                    url: 'https://ktr13k14.github.io/site-du-bot/'
-                }
-            ],
-            status: 'dnd'
+            status: 'online',
+            activities: []
         });
 
         console.log(
-            '🔴 Statut : Ne pas déranger'
-        );
-
-        console.log(
-            '🌐 Activité : Site du bot (lien cliquable)' 
+            '🟢 Statut : En ligne'
         );
 
         await registerCommands();
