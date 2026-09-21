@@ -427,167 +427,78 @@ async function searchSteamGame(gameName) {
 // IA
 // ==================================================
 
-async function askAI(
-    channelId,
-    question,
-    userName,
-    imageUrls = []
-) {
-    const apiKey = process.env.MISTRAL_API_KEY;
-
-    if (!apiKey) {
-        throw new Error('MISTRAL_API_KEY absente.');
+async function askAI(channelId, question, userName, imageUrls = []) {
+    if (!process.env.GROQ_API_KEY) {
+        throw new Error('GROQ_API_KEY absente.');
     }
 
     const history = getHistory(channelId);
 
-    const systemPrompt = `
-Tu es KTR.BOT, un assistant IA intégré à Discord.
-
+    const systemPrompt = `Tu es KTR.BOT, un assistant IA intégré à Discord.
 Tu réponds en français sauf si l'utilisateur demande une autre langue.
-
-Tu aides notamment pour :
-- programmation JavaScript / Node.js / Python
-- création et modification de bots Discord
-- dépannage d'erreurs
-- explications techniques
-- idées de projets
-- jeux vidéo
-- questions générales
-
-Quand une image est fournie :
-- regarde attentivement son contenu
-- décris uniquement ce qui est réellement visible
-- lis le texte visible quand c'est possible
-- utilise l'image pour répondre à la question
-- ne prétends pas voir quelque chose qui n'est pas clairement visible
-
-Quand tu fournis du code :
-- donne du code complet quand c'est pertinent
-- explique exactement où le mettre
-- évite de supprimer des fonctionnalités existantes sans raison
-- signale les erreurs probables
-- privilégie les solutions simples et fonctionnelles
-
-Sois utile, direct et clair.
-Tu peux utiliser des emojis avec modération.
-
-Nom Discord de l'utilisateur : ${userName}
-`;
+Tu aides pour la programmation, les bots Discord, le dépannage, les jeux vidéo et les questions générales.
+Tu peux analyser les images envoyées.
+Quand une image est fournie, décris uniquement ce qui est réellement visible et lis le texte visible quand c'est possible.
+Quand tu fournis du code, donne du code complet quand c'est pertinent et explique exactement où le mettre.
+Sois utile, direct et clair. Utilise des emojis avec modération.
+Nom Discord de l'utilisateur : ${userName}`;
 
     const messages = [
-        {
-            role: 'system',
-            content: systemPrompt
-        },
+        { role: 'system', content: systemPrompt },
         ...history.map(item => ({
             role: item.role === 'assistant' ? 'assistant' : 'user',
-            content: typeof item.content === 'string'
-                ? item.content
-                : '[Image envoyée précédemment]'
+            content: typeof item.content === 'string' ? item.content : '[Image envoyée précédemment]'
         }))
     ];
 
-    let currentMessage;
+    let currentContent = question?.trim() || (imageUrls.length ? 'Analyse cette image.' : 'Bonjour.');
+    let model = GROQ_MODEL;
 
-    if (imageUrls.length > 0) {
-        const content = [];
-
-        if (question?.trim()) {
-            content.push({
-                type: 'text',
-                text: question.trim()
-            });
-        } else {
-            content.push({
-                type: 'text',
-                text: 'Analyse cette image.'
-            });
-        }
-
-        for (const imageUrl of imageUrls.slice(0, 5)) {
-            content.push({
+    if (imageUrls.length) {
+        model = GROQ_VISION_MODEL;
+        currentContent = [
+            { type: 'text', text: currentContent },
+            ...imageUrls.slice(0, 3).map(url => ({
                 type: 'image_url',
-                image_url: {
-                    url: imageUrl
-                }
-            });
-        }
-
-        currentMessage = {
-            role: 'user',
-            content
-        };
-    } else {
-        currentMessage = {
-            role: 'user',
-            content: question?.trim() || 'Bonjour.'
-        };
+                image_url: { url }
+            }))
+        ];
     }
 
-    messages.push(currentMessage);
+    messages.push({ role: 'user', content: currentContent });
 
-    const model = imageUrls.length > 0
-        ? MISTRAL_VISION_MODEL
-        : MISTRAL_MODEL;
+    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${process.env.GROQ_API_KEY}`
+        },
+        body: JSON.stringify({
+            model,
+            messages,
+            temperature: 0.7,
+            max_completion_tokens: 4096
+        })
+    });
 
-    const response = await fetch(
-        'https://api.mistral.ai/v1/chat/completions',
-        {
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${apiKey}`,
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                model,
-                messages,
-                temperature: 0.7,
-                max_tokens: 2048
-            })
-        }
-    );
-
-    const data = await response.json().catch(() => null);
+    const data = await response.json().catch(() => ({}));
 
     if (!response.ok) {
-        const detail =
-            data?.message ||
-            data?.error?.message ||
-            `HTTP ${response.status}`;
-
-        throw new Error(`Mistral API ${response.status}: ${detail}`);
+        const detail = data?.error?.message || `HTTP ${response.status}`;
+        throw new Error(`Groq API ${response.status}: ${detail}`);
     }
 
-    const rawAnswer =
-        data?.choices?.[0]?.message?.content;
-
-    const answer = typeof rawAnswer === 'string'
-        ? rawAnswer.trim()
-        : Array.isArray(rawAnswer)
-            ? rawAnswer
-                .map(part => part?.text || '')
-                .join('')
-                .trim()
-            : '';
+    const answer = data?.choices?.[0]?.message?.content?.trim();
 
     if (!answer) {
-        throw new Error('Réponse Mistral vide.');
+        throw new Error('Réponse Groq vide.');
     }
 
-    addHistory(
-        channelId,
-        'user',
-        imageUrls.length > 0
-            ? `${question || 'Analyse cette image.'}\n[Image envoyée]`
-            : question
+    addHistory(channelId, 'user', imageUrls.length > 0
+        ? `${question || 'Analyse cette image.'}\n[Image envoyée]`
+        : question
     );
-
-    addHistory(
-        channelId,
-        'assistant',
-        answer
-    );
+    addHistory(channelId, 'assistant', answer);
 
     return answer;
 }
@@ -890,6 +801,32 @@ const commands = [
                         'Image à analyser (optionnel)'
                     )
                     .setRequired(false)
+        ),
+
+
+    new SlashCommandBuilder()
+        .setName('message')
+        .setDescription(
+            'Fait envoyer un message par le bot'
+        )
+        .addStringOption(
+            option =>
+                option
+                    .setName('texte')
+                    .setDescription(
+                        'Message à envoyer'
+                    )
+                    .setRequired(true)
+        ),
+
+    new SlashCommandBuilder()
+        .setName('message')
+        .setDescription('Faire envoyer un message par le bot')
+        .addStringOption(option =>
+            option
+                .setName('texte')
+                .setDescription('Message à envoyer')
+                .setRequired(true)
         ),
 
     new SlashCommandBuilder()
@@ -1365,6 +1302,39 @@ client.on(
             }
 
             // ==========================================
+            // /MESSAGE
+            // ==========================================
+
+            if (interaction.commandName === 'message') {
+                const texte = interaction.options.getString('texte');
+
+                try {
+                    await interaction.channel.send({
+                        content: texte,
+                        allowedMentions: {
+                            parse: ['everyone', 'users', 'roles']
+                        }
+                    });
+
+                    await interaction.reply({
+                        content: '✅ Message envoyé.',
+                        flags: MessageFlags.Ephemeral
+                    });
+                } catch (error) {
+                    console.error('❌ Erreur /message :', error);
+
+                    if (!interaction.replied && !interaction.deferred) {
+                        await interaction.reply({
+                            content: '❌ Impossible d’envoyer le message.',
+                            flags: MessageFlags.Ephemeral
+                        });
+                    }
+                }
+
+                return;
+            }
+
+            // ==========================================
             // /IA
             // ==========================================
 
@@ -1442,6 +1412,66 @@ client.on(
             }
 
             // ==========================================
+            // /message
+            // ==========================================
+
+            if (
+                interaction.commandName ===
+                'message'
+            ) {
+                const texte =
+                    interaction.options.getString(
+                        'texte'
+                    );
+
+                if (
+                    !interaction.channel ||
+                    !interaction.channel.isTextBased()
+                ) {
+                    await interaction.reply({
+                        content:
+                            '❌ Cette commande ne fonctionne pas ici.',
+                        flags:
+                            MessageFlags.Ephemeral
+                    });
+                    return;
+                }
+
+                try {
+                    await interaction.channel.send({
+                        content: texte,
+                        allowedMentions: {
+                            parse: ['everyone', 'users', 'roles']
+                        }
+                    });
+
+                    await interaction.reply({
+                        content: '✅ Message envoyé.',
+                        flags: MessageFlags.Ephemeral
+                    });
+                } catch (error) {
+                    console.error(
+                        '❌ Erreur /message :',
+                        error
+                    );
+
+                    if (
+                        !interaction.replied &&
+                        !interaction.deferred
+                    ) {
+                        await interaction.reply({
+                            content:
+                                '❌ Impossible d’envoyer le message.',
+                            flags:
+                                MessageFlags.Ephemeral
+                        });
+                    }
+                }
+
+                return;
+            }
+
+            // ==========================================
             // /help
             // ==========================================
 
@@ -1465,7 +1495,7 @@ client.on(
 
                             '**🛠️ Modération**\n' +
                             '`/clear10` → `/clear100` `' +
-                            '`/kick` `/ban` `/timeout` `/untimeout` `/say`\n\n' +
+                            '`/kick` `/ban` `/timeout` `/untimeout` `/say` `/message`\n\n' +
 
                             '**📊 Infos**\n' +
                             '`/ping` `/uptime` `/avatar` `' +
