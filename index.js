@@ -1080,9 +1080,9 @@ client.once(
         client.user.setPresence({
             activities: [
                 {
-                    name:
-                        'En train de chier 💩',
-                    type: 0
+                    name: 'Site du bot 🌐',
+                    type: 1,
+                    url: 'https://ktr13k14.github.io/site-du-bot/'
                 }
             ],
             status: 'dnd'
@@ -1093,7 +1093,7 @@ client.once(
         );
 
         console.log(
-            '💩 Activité : En train de chier'
+            '🌐 Activité : Site du bot (lien cliquable)' 
         );
 
         await registerCommands();
