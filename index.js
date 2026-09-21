@@ -431,7 +431,8 @@ async function searchSteamGame(gameName) {
 async function askAI(
     channelId,
     question,
-    userName
+    userName,
+    imageUrls = []
 ) {
     const history =
         getHistory(channelId);
@@ -450,6 +451,14 @@ Tu aides notamment pour :
 - jeux vidéo
 - questions générales
 
+Tu peux analyser les images envoyées par l'utilisateur.
+Quand une image est fournie :
+- regarde attentivement son contenu
+- décris ce qui est réellement visible
+- lis le texte visible quand c'est possible
+- utilise l'image pour répondre à la question de l'utilisateur
+- ne prétends pas voir quelque chose qui n'est pas clairement visible
+
 Quand tu fournis du code :
 - donne du code complet quand c'est pertinent
 - explique exactement où le mettre
@@ -463,6 +472,23 @@ Tu peux utiliser des emojis avec modération.
 Nom Discord de l'utilisateur : ${userName}
 `;
 
+    const currentContent = [];
+
+    if (question?.trim()) {
+        currentContent.push({
+            type: 'input_text',
+            text: question
+        });
+    }
+
+    for (const imageUrl of imageUrls.slice(0, 5)) {
+        currentContent.push({
+            type: 'input_image',
+            image_url: imageUrl,
+            detail: 'auto'
+        });
+    }
+
     const input = [
         {
             role: 'system',
@@ -471,7 +497,10 @@ Nom Discord de l'utilisateur : ${userName}
         ...history,
         {
             role: 'user',
-            content: question
+            content: currentContent.length === 1 &&
+                currentContent[0].type === 'input_text'
+                ? currentContent[0].text
+                : currentContent
         }
     ];
 
@@ -490,10 +519,15 @@ Nom Discord de l'utilisateur : ${userName}
         );
     }
 
+    const historyContent =
+        imageUrls.length > 0
+            ? currentContent
+            : question;
+
     addHistory(
         channelId,
         'user',
-        question
+        historyContent
     );
 
     addHistory(
@@ -794,6 +828,15 @@ const commands = [
                         'Ta question'
                     )
                     .setRequired(true)
+        )
+        .addAttachmentOption(
+            option =>
+                option
+                    .setName('image')
+                    .setDescription(
+                        'Image à analyser (optionnel)'
+                    )
+                    .setRequired(false)
         ),
 
     new SlashCommandBuilder()
@@ -1171,10 +1214,28 @@ client.on(
         try {
             await message.channel.sendTyping();
 
+            const imageUrls =
+                message.attachments
+                    .filter(attachment => {
+                        const type =
+                            attachment.contentType || '';
+
+                        return (
+                            type.startsWith('image/') ||
+                            /\.(png|jpe?g|gif|webp|bmp|avif)(\?|$)/i.test(
+                                attachment.url
+                            )
+                        );
+                    })
+                    .map(attachment => attachment.url)
+                    .slice(0, 5);
+
+            // Un message avec une image compte aussi comme activité IA.
             const answer = await askAI(
                 channelId,
-                message.content,
-                message.author.username
+                message.content || 'Analyse cette image.',
+                message.author.username,
+                imageUrls
             );
 
             resetAIInactivityTimer(channelId);
@@ -1275,6 +1336,15 @@ client.on(
                         'question'
                     );
 
+                const image =
+                    interaction.options.getAttachment(
+                        'image'
+                    );
+
+                const imageUrls = image
+                    ? [image.url]
+                    : [];
+
                 await interaction.deferReply();
 
                 const channelId = interaction.channelId;
@@ -1283,7 +1353,8 @@ client.on(
                     await askAI(
                         channelId,
                         question,
-                        interaction.user.username
+                        interaction.user.username,
+                        imageUrls
                     );
 
                 // Chaque question repousse le délai de 2 minutes pour CE salon.
