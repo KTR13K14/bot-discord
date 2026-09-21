@@ -14,6 +14,7 @@ const {
     MessageFlags,
     PermissionFlagsBits,
     EmbedBuilder,
+    ChannelType,
     version: discordJsVersion
 } = require('discord.js');
 
@@ -60,6 +61,10 @@ const STEAM_CHANNEL_ID = '1548402848302243922';
 const PANEL_CHANNEL_ID = '1548642071290839140';
 
 const AI_CHANNEL_ID = '1551633371787038840';
+const AI_TIMEOUT_MS = 2 * 60 * 1000; // 2 minutes sans nouvelle question
+
+let activeAIChannelId = AI_CHANNEL_ID;
+let aiInactivityTimer = null;
 
 // ==================================================
 // HISTORIQUE IA
@@ -87,6 +92,151 @@ function addHistory(channelId, role, content) {
 
     while (history.length > MAX_HISTORY) {
         history.shift();
+    }
+}
+
+// ==================================================
+// GESTION DU SALON IA
+// ==================================================
+
+function clearAIInactivityTimer() {
+    if (aiInactivityTimer) {
+        clearTimeout(aiInactivityTimer);
+        aiInactivityTimer = null;
+    }
+}
+
+function resetAIInactivityTimer() {
+    clearAIInactivityTimer();
+
+    aiInactivityTimer = setTimeout(
+        async () => {
+            await closeAndRecreateAIChannel();
+        },
+        AI_TIMEOUT_MS
+    );
+}
+
+async function findOrCreateAIChannel(guild) {
+    let channel = guild.channels.cache.get(activeAIChannelId);
+
+    if (
+        channel &&
+        channel.type === ChannelType.GuildText
+    ) {
+        return channel;
+    }
+
+    channel = guild.channels.cache.find(
+        channel =>
+            channel.type === ChannelType.GuildText &&
+            channel.name === 'ia'
+    );
+
+    if (channel) {
+        activeAIChannelId = channel.id;
+        return channel;
+    }
+
+    channel = await guild.channels.create({
+        name: 'ia',
+        type: ChannelType.GuildText,
+        reason: 'Création du salon IA'
+    });
+
+    activeAIChannelId = channel.id;
+
+    await channel.send(
+        '🤖 **Nouveau salon IA prêt !**\n' +
+        'Utilisez `/ia question:` pour poser vos questions.'
+    );
+
+    return channel;
+}
+
+async function closeAndRecreateAIChannel() {
+    clearAIInactivityTimer();
+
+    const oldChannelId = activeAIChannelId;
+
+    try {
+        const oldChannel =
+            await client.channels.fetch(oldChannelId).catch(() => null);
+
+        const guild =
+            client.guilds.cache.get(GUILD_ID);
+
+        if (!guild) {
+            console.error('❌ Serveur introuvable pour recréer le salon IA.');
+            return;
+        }
+
+        let permissionOverwrites;
+
+        if (
+            oldChannel &&
+            oldChannel.permissionOverwrites?.cache
+        ) {
+            permissionOverwrites =
+                [...oldChannel.permissionOverwrites.cache.values()]
+                    .map(overwrite => overwrite.toJSON());
+        }
+
+        const newChannel =
+            await guild.channels.create({
+                name: 'ia',
+                type: ChannelType.GuildText,
+                parent:
+                    oldChannel?.parentId ??
+                    undefined,
+                permissionOverwrites,
+                reason:
+                    'Nouvelle conversation IA après 2 minutes sans question'
+            });
+
+        activeAIChannelId = newChannel.id;
+
+        // L'ancien historique est définitivement oublié.
+        aiHistory.delete(oldChannelId);
+
+        await newChannel.send({
+            content:
+                '@everyone\n\n' +
+                '🔒 **Conversation terminée.**\n' +
+                'Aucune nouvelle question n’a été posée pendant **2 minutes**.\n\n' +
+                '🧠 L’historique de la conversation précédente a été supprimé.\n\n' +
+                '🤖 **Une nouvelle conversation est maintenant ouverte !**\n' +
+                'Utilisez `/ia question:` pour commencer.',
+            allowedMentions: {
+                parse: ['everyone']
+            }
+        });
+
+        if (
+            oldChannel &&
+            typeof oldChannel.delete === 'function' &&
+            oldChannel.deletable
+        ) {
+            await oldChannel.delete(
+                'Conversation IA terminée après 2 minutes sans nouvelle question'
+            );
+        }
+
+        console.log(
+            `🤖 Salon IA renouvelé : ${newChannel.id}`
+        );
+
+        // Le chrono repartira à la prochaine question.
+        aiInactivityTimer = null;
+
+    } catch (error) {
+        console.error(
+            '❌ Impossible de recréer le salon IA :',
+            error
+        );
+
+        aiHistory.delete(oldChannelId);
+        aiInactivityTimer = null;
     }
 }
 
@@ -912,6 +1062,13 @@ client.once(
             return;
         }
 
+        const aiChannel =
+            await findOrCreateAIChannel(guild);
+
+        console.log(
+            `🤖 Salon IA actif : #${aiChannel.name} (${aiChannel.id})`
+        );
+
         const voiceChannel =
             guild.channels.cache.get(
                 VOICE_CHANNEL_ID
@@ -1014,11 +1171,11 @@ client.on(
 
                 if (
                     interaction.channelId !==
-                    AI_CHANNEL_ID
+                    activeAIChannelId
                 ) {
                     await interaction.reply({
                         content:
-                            '❌ Utilise `/ia` dans le salon IA prévu.',
+                            '❌ Utilise `/ia` dans le salon IA actuellement ouvert.',
                         flags:
                             MessageFlags.Ephemeral
                     });
@@ -1046,10 +1203,13 @@ client.on(
 
                 const answer =
                     await askAI(
-                        interaction.channelId,
+                        activeAIChannelId,
                         question,
                         interaction.user.username
                     );
+
+                // Chaque nouvelle question repousse le délai de 2 minutes.
+                resetAIInactivityTimer();
 
                 // Discord limite les messages à 2000 caractères
                 if (answer.length <= 2000) {
@@ -1095,7 +1255,8 @@ client.on(
                         )
                         .setDescription(
                             '**🤖 IA**\n' +
-                            '`/ia question:`\n\n' +
+                            '`/ia question:`\n' +
+                            'Le salon est renouvelé après 2 minutes sans nouvelle question.\n\n' +
 
                             '**🔊 Vocal**\n' +
                             '`/grosfdp` `/rejoin` `/fdp`\n\n' +
