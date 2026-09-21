@@ -56,7 +56,7 @@ const VOICE_CHANNEL_ID = '1547964030105161753';
 
 const GENERAL_CHANNEL_ID = '1547964030105161752';
 
-const COUNT_CHANNEL_ID = '1551630822694461642';
+const COUNT_CHANNEL_ID = '1551661714129428630';
 
 const STEAM_CHANNEL_ID = '1548402848302243922';
 
@@ -1937,6 +1937,17 @@ client.on(
                 'compteur'
             ) {
 
+                if (interaction.channelId !== COUNT_CHANNEL_ID) {
+                    await interaction.reply({
+                        content:
+                            `❌ La commande /compteur fonctionne uniquement dans <#${COUNT_CHANNEL_ID}>.`,
+                        flags:
+                            MessageFlags.Ephemeral
+                    });
+
+                    return;
+                }
+
                 if (counting) {
                     await interaction.reply({
                         content:
@@ -1968,6 +1979,17 @@ client.on(
                 interaction.commandName ===
                 'stopcompteur'
             ) {
+
+                if (interaction.channelId !== COUNT_CHANNEL_ID) {
+                    await interaction.reply({
+                        content:
+                            `❌ La commande /stopcompteur fonctionne uniquement dans <#${COUNT_CHANNEL_ID}>.`,
+                        flags:
+                            MessageFlags.Ephemeral
+                    });
+
+                    return;
+                }
 
                 if (!counting) {
                     await interaction.reply({
