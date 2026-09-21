@@ -32,6 +32,8 @@ const OpenAI = require('openai');
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent,
         GatewayIntentBits.GuildVoiceStates
     ]
 });
@@ -61,10 +63,11 @@ const STEAM_CHANNEL_ID = '1548402848302243922';
 const PANEL_CHANNEL_ID = '1548642071290839140';
 
 const AI_CHANNEL_ID = '1551633371787038840';
-const AI_TIMEOUT_MS = 2 * 60 * 1000; // 2 minutes sans nouvelle question
+const AI_TIMEOUT_MS = 2 * 60 * 1000; // 2 minutes sans nouveau message
 
 let activeAIChannelId = AI_CHANNEL_ID;
 let aiInactivityTimer = null;
+const aiChannelTimers = new Map();
 
 // ==================================================
 // HISTORIQUE IA
@@ -99,22 +102,45 @@ function addHistory(channelId, role, content) {
 // GESTION DU SALON IA
 // ==================================================
 
-function clearAIInactivityTimer() {
-    if (aiInactivityTimer) {
+function clearAIInactivityTimer(channelId = activeAIChannelId) {
+    if (channelId === activeAIChannelId && aiInactivityTimer) {
         clearTimeout(aiInactivityTimer);
         aiInactivityTimer = null;
     }
+
+    const timer = aiChannelTimers.get(channelId);
+    if (timer) {
+        clearTimeout(timer);
+        aiChannelTimers.delete(channelId);
+    }
 }
 
-function resetAIInactivityTimer() {
-    clearAIInactivityTimer();
+function resetAIInactivityTimer(channelId = activeAIChannelId) {
+    clearAIInactivityTimer(channelId);
 
-    aiInactivityTimer = setTimeout(
-        async () => {
-            await closeAndRecreateAIChannel();
+    // Le salon IA automatique (#ia) est recréé après 2 minutes.
+    if (channelId === activeAIChannelId) {
+        aiInactivityTimer = setTimeout(
+            async () => {
+                await closeAndRecreateAIChannel();
+            },
+            AI_TIMEOUT_MS
+        );
+        return;
+    }
+
+    // Dans les autres salons, on efface seulement l'historique.
+    // Le bot ne supprimera jamais un salon qui n'est pas son #ia automatique.
+    const timer = setTimeout(
+        () => {
+            aiHistory.delete(channelId);
+            aiChannelTimers.delete(channelId);
+            console.log(`🧠 Historique IA effacé pour le salon ${channelId} après 2 minutes.`);
         },
         AI_TIMEOUT_MS
     );
+
+    aiChannelTimers.set(channelId, timer);
 }
 
 async function findOrCreateAIChannel(guild) {
@@ -218,7 +244,7 @@ async function closeAndRecreateAIChannel() {
             oldChannel.deletable
         ) {
             await oldChannel.delete(
-                'Conversation IA terminée après 2 minutes sans nouvelle question'
+                'Conversation IA terminée après 2 minutes sans nouveau message'
             );
         }
 
@@ -1112,34 +1138,29 @@ client.once(
 // ==================================================
 
 // ==================================================
-// MODE CONVERSATION IA
+// CONVERSATION IA SANS /ia À CHAQUE MESSAGE
 // ==================================================
-// /ia lance la conversation. Ensuite, les messages normaux
-// dans le salon IA sont envoyés à l'IA sans refaire /ia.
-// Chaque message remet le délai de 2 minutes à zéro.
+// /ia peut être utilisé dans N'IMPORTE QUEL salon texte.
+// Une fois /ia lancé dans un salon, les messages normaux de ce salon
+// continuent la même conversation pendant 2 minutes d'inactivité maximum.
 client.on(
     'messageCreate',
     async message => {
 
         if (
             message.author.bot ||
-            message.channelId !== activeAIChannelId ||
+            !message.guild ||
             !message.content ||
             message.content.startsWith('/')
         ) {
             return;
         }
 
-        const history =
-            aiHistory.get(
-                activeAIChannelId
-            );
+        const channelId = message.channelId;
+        const history = aiHistory.get(channelId);
 
-        // La conversation doit d'abord être lancée avec /ia.
-        if (
-            !history ||
-            history.length === 0
-        ) {
+        // Il faut d'abord lancer /ia dans ce salon.
+        if (!history || history.length === 0) {
             return;
         }
 
@@ -1148,50 +1169,31 @@ client.on(
         }
 
         try {
-
             await message.channel.sendTyping();
 
-            const answer =
-                await askAI(
-                    activeAIChannelId,
-                    message.content,
-                    message.author.username
-                );
-
-            resetAIInactivityTimer();
-
-            if (answer.length <= 2000) {
-                await message.reply(
-                    answer
-                );
-            } else {
-
-                const parts =
-                    answer.match(
-                        /.{1,1900}/gs
-                    ) || [];
-
-                await message.reply(
-                    parts[0]
-                );
-
-                for (
-                    const part of
-                    parts.slice(1)
-                ) {
-                    await message.channel.send(
-                        part
-                    );
-                }
-            }
-
-        } catch (error) {
-
-            console.error(
-                '❌ Erreur IA message normal :',
-                error
+            const answer = await askAI(
+                channelId,
+                message.content,
+                message.author.username
             );
 
+            resetAIInactivityTimer(channelId);
+
+            if (answer.length <= 2000) {
+                await message.reply(answer);
+            } else {
+                const parts = answer.match(/.{1,1900}/gs) || [];
+
+                if (parts[0]) {
+                    await message.reply(parts[0]);
+                }
+
+                for (const part of parts.slice(1)) {
+                    await message.channel.send(part);
+                }
+            }
+        } catch (error) {
+            console.error('❌ Erreur IA message normal :', error);
             await message.reply(
                 '❌ Une erreur est survenue avec l’IA.'
             ).catch(() => {});
@@ -1257,24 +1259,10 @@ client.on(
                 'ia'
             ) {
 
-                if (
-                    interaction.channelId !==
-                    activeAIChannelId
-                ) {
-                    await interaction.reply({
-                        content:
-                            '❌ Utilise `/ia` dans le salon IA actuellement ouvert.',
-                        flags:
-                            MessageFlags.Ephemeral
-                    });
-
-                    return;
-                }
-
                 if (!process.env.OPENAI_API_KEY) {
                     await interaction.reply({
                         content:
-                            '❌ La clé OpenAI n’est pas configurée.',
+                            '❌ La clé OpenAI n’est pas configurée dans `.env`.',
                         flags:
                             MessageFlags.Ephemeral
                     });
@@ -1289,15 +1277,19 @@ client.on(
 
                 await interaction.deferReply();
 
+                const channelId = interaction.channelId;
+
                 const answer =
                     await askAI(
-                        activeAIChannelId,
+                        channelId,
                         question,
                         interaction.user.username
                     );
 
-                resetAIInactivityTimer();
+                // Chaque question repousse le délai de 2 minutes pour CE salon.
+                resetAIInactivityTimer(channelId);
 
+                // Discord limite les messages à 2000 caractères
                 if (answer.length <= 2000) {
                     await interaction.editReply(
                         answer
@@ -1342,7 +1334,7 @@ client.on(
                         .setDescription(
                             '**🤖 IA**\n' +
                             '`/ia question:`\n' +
-                            'Fais `/ia` une fois, puis parle normalement. Le salon est renouvelé après 2 minutes sans message.\n\n' +
+                            'Le salon est renouvelé après 2 minutes sans nouveau message.\n\n' +
 
                             '**🔊 Vocal**\n' +
                             '`/grosfdp` `/rejoin` `/fdp`\n\n' +
