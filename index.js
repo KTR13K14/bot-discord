@@ -1416,7 +1416,9 @@ client.on(
                     ? [image.url]
                     : [];
 
-                await interaction.deferReply();
+                if (!interaction.replied && !interaction.deferred) {
+    await interaction.deferReply();
+}
 
                 const channelId = interaction.channelId;
 
