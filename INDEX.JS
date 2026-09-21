@@ -1,0 +1,2430 @@
+require('dotenv').config();
+
+const fs = require('fs');
+const path = require('path');
+
+const {
+    Client,
+    GatewayIntentBits,
+    REST,
+    Routes,
+    SlashCommandBuilder,
+    ActionRowBuilder,
+    StringSelectMenuBuilder,
+    MessageFlags,
+    PermissionFlagsBits,
+    EmbedBuilder,
+    version: discordJsVersion
+} = require('discord.js');
+
+const {
+    joinVoiceChannel,
+    getVoiceConnection
+} = require('@discordjs/voice');
+
+const OpenAI = require('openai');
+
+// ==================================================
+// CLIENT
+// ==================================================
+
+const client = new Client({
+    intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildVoiceStates
+    ]
+});
+
+// ==================================================
+// OPENAI
+// ==================================================
+
+const openai = new OpenAI({
+    apiKey: process.env.OPENAI_API_KEY
+});
+
+// ==================================================
+// CONFIG
+// ==================================================
+
+const GUILD_ID = '1547964026854580235';
+
+const VOICE_CHANNEL_ID = '1547964030105161753';
+
+const GENERAL_CHANNEL_ID = '1547964030105161752';
+
+const COUNT_CHANNEL_ID = '1551630822694461642';
+
+const STEAM_CHANNEL_ID = '1548402848302243922';
+
+const PANEL_CHANNEL_ID = '1548642071290839140';
+
+const AI_CHANNEL_ID = '1551633371787038840';
+
+// ==================================================
+// HISTORIQUE IA
+// ==================================================
+
+const aiHistory = new Map();
+
+const MAX_HISTORY = 12;
+
+function getHistory(channelId) {
+    if (!aiHistory.has(channelId)) {
+        aiHistory.set(channelId, []);
+    }
+
+    return aiHistory.get(channelId);
+}
+
+function addHistory(channelId, role, content) {
+    const history = getHistory(channelId);
+
+    history.push({
+        role,
+        content
+    });
+
+    while (history.length > MAX_HISTORY) {
+        history.shift();
+    }
+}
+
+// ==================================================
+// COMPTEUR
+// ==================================================
+
+const COUNTER_FILE = path.join(
+    __dirname,
+    'counter.json'
+);
+
+let count = 1;
+let counting = false;
+let countInterval = null;
+
+if (fs.existsSync(COUNTER_FILE)) {
+    try {
+        const saved = JSON.parse(
+            fs.readFileSync(
+                COUNTER_FILE,
+                'utf8'
+            )
+        );
+
+        if (
+            Number.isInteger(saved.count) &&
+            saved.count >= 1
+        ) {
+            count = saved.count;
+        }
+    } catch {
+        console.log(
+            '⚠️ counter.json illisible.'
+        );
+    }
+}
+
+function saveCounter() {
+    fs.writeFileSync(
+        COUNTER_FILE,
+        JSON.stringify(
+            { count },
+            null,
+            2
+        ),
+        'utf8'
+    );
+}
+
+function stopCounter() {
+    counting = false;
+
+    if (countInterval) {
+        clearInterval(countInterval);
+        countInterval = null;
+    }
+
+    saveCounter();
+}
+
+async function startCounter() {
+    if (counting) {
+        return false;
+    }
+
+    const channel =
+        await client.channels.fetch(
+            COUNT_CHANNEL_ID
+        );
+
+    if (
+        !channel ||
+        !channel.isTextBased()
+    ) {
+        throw new Error(
+            'Salon compteur introuvable.'
+        );
+    }
+
+    counting = true;
+
+    await channel.send(
+        String(count)
+    );
+
+    count++;
+    saveCounter();
+
+    countInterval = setInterval(
+        async () => {
+            if (!counting) {
+                return;
+            }
+
+            try {
+                await channel.send(
+                    String(count)
+                );
+
+                count++;
+                saveCounter();
+
+            } catch (error) {
+                console.error(
+                    '❌ Erreur compteur :',
+                    error
+                );
+
+                stopCounter();
+            }
+        },
+        2000
+    );
+
+    return true;
+}
+
+// ==================================================
+// VOCAL
+// ==================================================
+
+function connectToVoice(channel) {
+    return joinVoiceChannel({
+        channelId: channel.id,
+        guildId: channel.guild.id,
+        adapterCreator:
+            channel.guild.voiceAdapterCreator,
+        selfMute: true,
+        selfDeaf: true
+    });
+}
+
+// ==================================================
+// STEAM
+// ==================================================
+
+async function searchSteamGame(gameName) {
+    const url =
+        'https://store.steampowered.com/api/storesearch/' +
+        `?term=${encodeURIComponent(gameName)}` +
+        '&cc=fr&l=french';
+
+    const response =
+        await fetch(url);
+
+    if (!response.ok) {
+        throw new Error(
+            `Steam HTTP ${response.status}`
+        );
+    }
+
+    const data =
+        await response.json();
+
+    return data.items?.slice(
+        0,
+        5
+    ) ?? [];
+}
+
+// ==================================================
+// IA
+// ==================================================
+
+async function askAI(
+    channelId,
+    question,
+    userName
+) {
+    const history =
+        getHistory(channelId);
+
+    const systemPrompt = `
+Tu es KTR.BOT, un assistant IA intégré à Discord.
+
+Tu réponds en français sauf si l'utilisateur demande une autre langue.
+
+Tu aides notamment pour :
+- programmation JavaScript / Node.js / Python
+- création et modification de bots Discord
+- dépannage d'erreurs
+- explications techniques
+- idées de projets
+- jeux vidéo
+- questions générales
+
+Quand tu fournis du code :
+- donne du code complet quand c'est pertinent
+- explique exactement où le mettre
+- évite de supprimer des fonctionnalités existantes sans raison
+- signale les erreurs probables
+- privilégie les solutions simples et fonctionnelles
+
+Sois utile, direct et clair.
+Tu peux utiliser des emojis avec modération.
+
+Nom Discord de l'utilisateur : ${userName}
+`;
+
+    const input = [
+        {
+            role: 'system',
+            content: systemPrompt
+        },
+        ...history,
+        {
+            role: 'user',
+            content: question
+        }
+    ];
+
+    const response =
+        await openai.responses.create({
+            model: 'gpt-5.6-luna',
+            input
+        });
+
+    const answer =
+        response.output_text?.trim();
+
+    if (!answer) {
+        throw new Error(
+            'Réponse IA vide.'
+        );
+    }
+
+    addHistory(
+        channelId,
+        'user',
+        question
+    );
+
+    addHistory(
+        channelId,
+        'assistant',
+        answer
+    );
+
+    return answer;
+}
+
+// ==================================================
+// PANNEAU
+// ==================================================
+
+function createPanel() {
+    const embed =
+        new EmbedBuilder()
+            .setTitle(
+                '⚡ KTR.BOT — RESSOURCES'
+            )
+            .setDescription(
+                'Bienvenue 👋\n\n' +
+                'Choisis une ressource dans le menu ci-dessous.\n\n' +
+                '🎵 Spotify / Spicetify\n' +
+                '🧩 Plugins Steam\n' +
+                '⚡ Project Lightning\n' +
+                '🎮 Steam'
+            )
+            .setColor(0x5865F2)
+            .setFooter({
+                text:
+                    'KTR.BOT • Ressources'
+            });
+
+    const menu =
+        new StringSelectMenuBuilder()
+            .setCustomId(
+                'resource_menu'
+            )
+            .setPlaceholder(
+                'Sélectionnez une option...'
+            )
+            .addOptions(
+                {
+                    label:
+                        'Spotify / Spicetify',
+                    description:
+                        'Ouvrir Spicetify',
+                    value:
+                        'spotify',
+                    emoji:
+                        '🎵'
+                },
+                {
+                    label:
+                        'Plugins Steam',
+                    description:
+                        'Ouvrir SteamBrew',
+                    value:
+                        'plugins',
+                    emoji:
+                        '🧩'
+                },
+                {
+                    label:
+                        'Project Lightning',
+                    description:
+                        'Ouvrir Project Lightning',
+                    value:
+                        'lightning',
+                    emoji:
+                        '⚡'
+                },
+                {
+                    label:
+                        'Steam',
+                    description:
+                        'Ouvrir Steam',
+                    value:
+                        'steam',
+                    emoji:
+                        '🎮'
+                }
+            );
+
+    return {
+        embeds: [embed],
+        components: [
+            new ActionRowBuilder()
+                .addComponents(menu)
+        ]
+    };
+}
+
+// ==================================================
+// UPTIME
+// ==================================================
+
+function formatUptime(ms) {
+    let seconds =
+        Math.floor(ms / 1000);
+
+    const days =
+        Math.floor(
+            seconds / 86400
+        );
+
+    seconds %= 86400;
+
+    const hours =
+        Math.floor(
+            seconds / 3600
+        );
+
+    seconds %= 3600;
+
+    const minutes =
+        Math.floor(
+            seconds / 60
+        );
+
+    seconds %= 60;
+
+    return (
+        `${days}j ` +
+        `${hours}h ` +
+        `${minutes}m ` +
+        `${seconds}s`
+    );
+}
+
+// ==================================================
+// COMMANDES
+// ==================================================
+
+const commands = [
+    new SlashCommandBuilder()
+        .setName('help')
+        .setDescription(
+            'Affiche les commandes'
+        ),
+
+    new SlashCommandBuilder()
+        .setName('ping')
+        .setDescription(
+            'Affiche le ping du bot'
+        ),
+
+    new SlashCommandBuilder()
+        .setName('uptime')
+        .setDescription(
+            'Affiche depuis combien de temps le bot tourne'
+        ),
+
+    new SlashCommandBuilder()
+        .setName('avatar')
+        .setDescription(
+            'Affiche un avatar'
+        )
+        .addUserOption(
+            option =>
+                option
+                    .setName('membre')
+                    .setDescription(
+                        'Membre'
+                    )
+                    .setRequired(false)
+        ),
+
+    new SlashCommandBuilder()
+        .setName('userinfo')
+        .setDescription(
+            'Affiche les informations d’un membre'
+        )
+        .addUserOption(
+            option =>
+                option
+                    .setName('membre')
+                    .setDescription(
+                        'Membre'
+                    )
+                    .setRequired(true)
+        ),
+
+    new SlashCommandBuilder()
+        .setName('serverinfo')
+        .setDescription(
+            'Affiche les informations du serveur'
+        ),
+
+    new SlashCommandBuilder()
+        .setName('botinfo')
+        .setDescription(
+            'Affiche les informations du bot'
+        ),
+
+    new SlashCommandBuilder()
+        .setName('channelinfo')
+        .setDescription(
+            'Affiche les informations d’un salon'
+        )
+        .addChannelOption(
+            option =>
+                option
+                    .setName('salon')
+                    .setDescription(
+                        'Salon'
+                    )
+                    .setRequired(true)
+        ),
+
+    new SlashCommandBuilder()
+        .setName('grosfdp')
+        .setDescription(
+            'Rejoint le vocal où tu es'
+        ),
+
+    new SlashCommandBuilder()
+        .setName('rejoin')
+        .setDescription(
+            'Reconnecte le bot dans ton vocal'
+        ),
+
+    new SlashCommandBuilder()
+        .setName('fdp')
+        .setDescription(
+            'Quitte le vocal'
+        ),
+
+    new SlashCommandBuilder()
+        .setName('parle')
+        .setDescription(
+            'Envoie un message dans le général'
+        ),
+
+    new SlashCommandBuilder()
+        .setName('compteur')
+        .setDescription(
+            'Lance le compteur'
+        ),
+
+    new SlashCommandBuilder()
+        .setName('stopcompteur')
+        .setDescription(
+            'Arrête le compteur'
+        ),
+
+    new SlashCommandBuilder()
+        .setName('steamid')
+        .setDescription(
+            'Cherche le Steam App ID d’un jeu'
+        )
+        .addStringOption(
+            option =>
+                option
+                    .setName('jeu')
+                    .setDescription(
+                        'Nom du jeu'
+                    )
+                    .setRequired(true)
+        ),
+
+    new SlashCommandBuilder()
+        .setName('onlinefix')
+        .setDescription(
+            'Affiche le lien Project Lightning'
+        ),
+
+    new SlashCommandBuilder()
+        .setName('spotifyfree')
+        .setDescription(
+            'Affiche le lien Spicetify'
+        ),
+
+    new SlashCommandBuilder()
+        .setName('pluginsteam')
+        .setDescription(
+            'Affiche le lien SteamBrew'
+        ),
+
+    new SlashCommandBuilder()
+        .setName('panel')
+        .setDescription(
+            'Envoie le panneau des ressources'
+        ),
+
+    new SlashCommandBuilder()
+        .setName('ia')
+        .setDescription(
+            'Pose une question à l’IA'
+        )
+        .addStringOption(
+            option =>
+                option
+                    .setName('question')
+                    .setDescription(
+                        'Ta question'
+                    )
+                    .setRequired(true)
+        ),
+
+    new SlashCommandBuilder()
+        .setName('say')
+        .setDescription(
+            'Fait parler le bot'
+        )
+        .setDefaultMemberPermissions(
+            PermissionFlagsBits.ManageMessages
+        )
+        .addStringOption(
+            option =>
+                option
+                    .setName('texte')
+                    .setDescription(
+                        'Texte à envoyer'
+                    )
+                    .setRequired(true)
+        ),
+
+    new SlashCommandBuilder()
+        .setName('kick')
+        .setDescription(
+            'Expulse un membre'
+        )
+        .setDefaultMemberPermissions(
+            PermissionFlagsBits.KickMembers
+        )
+        .addUserOption(
+            option =>
+                option
+                    .setName('membre')
+                    .setDescription(
+                        'Membre'
+                    )
+                    .setRequired(true)
+        )
+        .addStringOption(
+            option =>
+                option
+                    .setName('raison')
+                    .setDescription(
+                        'Raison'
+                    )
+                    .setRequired(false)
+        ),
+
+    new SlashCommandBuilder()
+        .setName('ban')
+        .setDescription(
+            'Bannit un membre'
+        )
+        .setDefaultMemberPermissions(
+            PermissionFlagsBits.BanMembers
+        )
+        .addUserOption(
+            option =>
+                option
+                    .setName('membre')
+                    .setDescription(
+                        'Membre'
+                    )
+                    .setRequired(true)
+        )
+        .addStringOption(
+            option =>
+                option
+                    .setName('raison')
+                    .setDescription(
+                        'Raison'
+                    )
+                    .setRequired(false)
+        ),
+
+    new SlashCommandBuilder()
+        .setName('timeout')
+        .setDescription(
+            'Exclut temporairement un membre'
+        )
+        .setDefaultMemberPermissions(
+            PermissionFlagsBits.ModerateMembers
+        )
+        .addUserOption(
+            option =>
+                option
+                    .setName('membre')
+                    .setDescription(
+                        'Membre'
+                    )
+                    .setRequired(true)
+        )
+        .addIntegerOption(
+            option =>
+                option
+                    .setName('secondes')
+                    .setDescription(
+                        'Durée'
+                    )
+                    .setRequired(true)
+                    .setMinValue(1)
+                    .setMaxValue(
+                        2419200
+                    )
+        )
+        .addStringOption(
+            option =>
+                option
+                    .setName('raison')
+                    .setDescription(
+                        'Raison'
+                    )
+                    .setRequired(false)
+        ),
+
+    new SlashCommandBuilder()
+        .setName('untimeout')
+        .setDescription(
+            'Retire l’exclusion temporaire'
+        )
+        .setDefaultMemberPermissions(
+            PermissionFlagsBits.ModerateMembers
+        )
+        .addUserOption(
+            option =>
+                option
+                    .setName('membre')
+                    .setDescription(
+                        'Membre'
+                    )
+                    .setRequired(true)
+        ),
+
+    new SlashCommandBuilder()
+        .setName('8ball')
+        .setDescription(
+            'Répond à une question'
+        )
+        .addStringOption(
+            option =>
+                option
+                    .setName('question')
+                    .setDescription(
+                        'Question'
+                    )
+                    .setRequired(true)
+        ),
+
+    new SlashCommandBuilder()
+        .setName('coinflip')
+        .setDescription(
+            'Pile ou face'
+        ),
+
+    new SlashCommandBuilder()
+        .setName('roll')
+        .setDescription(
+            'Lance un dé'
+        )
+        .addIntegerOption(
+            option =>
+                option
+                    .setName('max')
+                    .setDescription(
+                        'Maximum'
+                    )
+                    .setRequired(false)
+                    .setMinValue(2)
+                    .setMaxValue(
+                        1000000
+                    )
+        ),
+
+    new SlashCommandBuilder()
+        .setName('random')
+        .setDescription(
+            'Nombre aléatoire'
+        )
+        .addIntegerOption(
+            option =>
+                option
+                    .setName('min')
+                    .setDescription(
+                        'Minimum'
+                    )
+                    .setRequired(true)
+        )
+        .addIntegerOption(
+            option =>
+                option
+                    .setName('max')
+                    .setDescription(
+                        'Maximum'
+                    )
+                    .setRequired(true)
+        ),
+
+    ...[
+        10,
+        20,
+        30,
+        40,
+        50,
+        60,
+        70,
+        80,
+        90,
+        100
+    ].map(
+        number =>
+            new SlashCommandBuilder()
+                .setName(
+                    `clear${number}`
+                )
+                .setDescription(
+                    `Supprime ${number} messages`
+                )
+                .setDefaultMemberPermissions(
+                    PermissionFlagsBits.ManageMessages
+                )
+                .toJSON()
+    )
+];
+
+// ==================================================
+// COMMANDES JSON
+// ==================================================
+
+async function registerCommands() {
+    const rest =
+        new REST({
+            version: '10'
+        }).setToken(
+            process.env.TOKEN
+        );
+
+    await rest.put(
+        Routes.applicationGuildCommands(
+            client.user.id,
+            GUILD_ID
+        ),
+        {
+            body: commands
+        }
+    );
+
+    console.log(
+        '✅ Toutes les commandes sont installées.'
+    );
+}
+
+// ==================================================
+// READY
+// ==================================================
+
+client.once(
+    'clientReady',
+    async () => {
+        console.log(
+            `✅ Connecté : ${client.user.tag}`
+        );
+
+        client.user.setPresence({
+            activities: [
+                {
+                    name:
+                        'En train de chier 💩',
+                    type: 0
+                }
+            ],
+            status: 'dnd'
+        });
+
+        console.log(
+            '🔴 Statut : Ne pas déranger'
+        );
+
+        console.log(
+            '💩 Activité : En train de chier'
+        );
+
+        await registerCommands();
+
+        const guild =
+            client.guilds.cache.get(
+                GUILD_ID
+            );
+
+        if (!guild) {
+            console.log(
+                '❌ Serveur introuvable.'
+            );
+            return;
+        }
+
+        const voiceChannel =
+            guild.channels.cache.get(
+                VOICE_CHANNEL_ID
+            );
+
+        if (
+            voiceChannel &&
+            voiceChannel.isVoiceBased()
+        ) {
+            connectToVoice(
+                voiceChannel
+            );
+
+            console.log(
+                `🔊 Connecté à ${voiceChannel.name}`
+            );
+        } else {
+            console.log(
+                '❌ Vocal introuvable.'
+            );
+        }
+
+        console.log(
+            `🔢 Compteur sauvegardé : ${count}`
+        );
+
+        if (!process.env.OPENAI_API_KEY) {
+            console.log(
+                '⚠️ OPENAI_API_KEY absent : /ia ne fonctionnera pas.'
+            );
+        } else {
+            console.log(
+                '🤖 IA activée.'
+            );
+        }
+    }
+);
+
+// ==================================================
+// INTERACTIONS
+// ==================================================
+
+client.on(
+    'interactionCreate',
+    async interaction => {
+
+        try {
+
+            // ==========================================
+            // MENU
+            // ==========================================
+
+            if (
+                interaction.isStringSelectMenu() &&
+                interaction.customId ===
+                    'resource_menu'
+            ) {
+
+                const selected =
+                    interaction.values[0];
+
+                const links = {
+                    spotify:
+                        '🎵 **Spicetify**\nhttps://spicetify.app',
+
+                    plugins:
+                        '🧩 **SteamBrew**\nhttps://steambrew.app',
+
+                    lightning:
+                        '⚡ **Project Lightning**\nhttps://project-lightning-web.vercel.app',
+
+                    steam:
+                        '🎮 **Steam**\nhttps://store.steampowered.com'
+                };
+
+                await interaction.reply({
+                    content:
+                        links[selected],
+                    flags:
+                        MessageFlags.Ephemeral
+                });
+
+                return;
+            }
+
+            if (
+                !interaction.isChatInputCommand()
+            ) {
+                return;
+            }
+
+            // ==========================================
+            // /IA
+            // ==========================================
+
+            if (
+                interaction.commandName ===
+                'ia'
+            ) {
+
+                if (
+                    interaction.channelId !==
+                    AI_CHANNEL_ID
+                ) {
+                    await interaction.reply({
+                        content:
+                            '❌ Utilise `/ia` dans le salon IA prévu.',
+                        flags:
+                            MessageFlags.Ephemeral
+                    });
+
+                    return;
+                }
+
+                if (!process.env.OPENAI_API_KEY) {
+                    await interaction.reply({
+                        content:
+                            '❌ La clé OpenAI n’est pas configurée dans `.env`.',
+                        flags:
+                            MessageFlags.Ephemeral
+                    });
+
+                    return;
+                }
+
+                const question =
+                    interaction.options.getString(
+                        'question'
+                    );
+
+                await interaction.deferReply();
+
+                const answer =
+                    await askAI(
+                        interaction.channelId,
+                        question,
+                        interaction.user.username
+                    );
+
+                // Discord limite les messages à 2000 caractères
+                if (answer.length <= 2000) {
+                    await interaction.editReply(
+                        answer
+                    );
+                } else {
+                    const parts =
+                        answer.match(
+                            /.{1,1900}/gs
+                        ) || [];
+
+                    await interaction.editReply(
+                        parts[0]
+                    );
+
+                    for (
+                        const part of
+                        parts.slice(1)
+                    ) {
+                        await interaction.channel.send(
+                            part
+                        );
+                    }
+                }
+
+                return;
+            }
+
+            // ==========================================
+            // /help
+            // ==========================================
+
+            if (
+                interaction.commandName ===
+                'help'
+            ) {
+
+                const embed =
+                    new EmbedBuilder()
+                        .setTitle(
+                            '📚 KTR.BOT — COMMANDES'
+                        )
+                        .setDescription(
+                            '**🤖 IA**\n' +
+                            '`/ia question:`\n\n' +
+
+                            '**🔊 Vocal**\n' +
+                            '`/grosfdp` `/rejoin` `/fdp`\n\n' +
+
+                            '**🛠️ Modération**\n' +
+                            '`/clear10` → `/clear100` `' +
+                            '`/kick` `/ban` `/timeout` `/untimeout` `/say`\n\n' +
+
+                            '**📊 Infos**\n' +
+                            '`/ping` `/uptime` `/avatar` `' +
+                            '`/userinfo` `/serverinfo` `/botinfo` `/channelinfo`\n\n' +
+
+                            '**🎮 Steam / Ressources**\n' +
+                            '`/steamid` `/onlinefix` `/spotifyfree` `/pluginsteam` `/panel`\n\n' +
+
+                            '**🔢 Outils**\n' +
+                            '`/compteur` `/stopcompteur` `/8ball` `/coinflip` `/roll` `/random`'
+                        )
+                        .setColor(
+                            0x5865F2
+                        );
+
+                await interaction.reply({
+                    embeds: [
+                        embed
+                    ]
+                });
+
+                return;
+            }
+
+            // ==========================================
+            // /ping
+            // ==========================================
+
+            if (
+                interaction.commandName ===
+                'ping'
+            ) {
+
+                await interaction.reply(
+                    `🏓 Pong ! **${client.ws.ping} ms**`
+                );
+
+                return;
+            }
+
+            // ==========================================
+            // /uptime
+            // ==========================================
+
+            if (
+                interaction.commandName ===
+                'uptime'
+            ) {
+
+                await interaction.reply(
+                    `⏱️ Le bot tourne depuis **${formatUptime(
+                        client.uptime || 0
+                    )}**.`
+                );
+
+                return;
+            }
+
+            // ==========================================
+            // /avatar
+            // ==========================================
+
+            if (
+                interaction.commandName ===
+                'avatar'
+            ) {
+
+                const user =
+                    interaction.options.getUser(
+                        'membre'
+                    ) ||
+                    interaction.user;
+
+                const embed =
+                    new EmbedBuilder()
+                        .setTitle(
+                            `🖼️ Avatar de ${user.username}`
+                        )
+                        .setImage(
+                            user.displayAvatarURL({
+                                size: 1024,
+                                extension:
+                                    'png'
+                            })
+                        )
+                        .setColor(
+                            0x5865F2
+                        );
+
+                await interaction.reply({
+                    embeds: [
+                        embed
+                    ]
+                });
+
+                return;
+            }
+
+            // ==========================================
+            // /userinfo
+            // ==========================================
+
+            if (
+                interaction.commandName ===
+                'userinfo'
+            ) {
+
+                const user =
+                    interaction.options.getUser(
+                        'membre'
+                    );
+
+                const member =
+                    await interaction.guild
+                        .members
+                        .fetch(
+                            user.id
+                        )
+                        .catch(
+                            () => null
+                        );
+
+                const created =
+                    Math.floor(
+                        user.createdTimestamp /
+                        1000
+                    );
+
+                const fields = [
+                    {
+                        name: '🆔 ID',
+                        value:
+                            `\`${user.id}\``
+                    },
+                    {
+                        name:
+                            '👤 Pseudo',
+                        value:
+                            `\`${user.username}\``
+                    },
+                    {
+                        name:
+                            '📛 Nom',
+                        value:
+                            user.globalName ||
+                            'Aucun'
+                    },
+                    {
+                        name:
+                            '📅 Création',
+                        value:
+                            `<t:${created}:F>\n<t:${created}:R>`
+                    },
+                    {
+                        name:
+                            '🤖 Type',
+                        value:
+                            user.bot
+                                ? 'Bot'
+                                : 'Utilisateur'
+                    }
+                ];
+
+                if (member) {
+
+                    fields.push({
+                        name:
+                            '📥 Arrivée',
+                        value:
+                            member.joinedTimestamp
+                                ? `<t:${Math.floor(
+                                    member.joinedTimestamp /
+                                    1000
+                                )}:F>`
+                                : 'Inconnue'
+                    });
+                }
+
+                await interaction.reply({
+                    embeds: [
+                        new EmbedBuilder()
+                            .setTitle(
+                                '🔎 Informations du membre'
+                            )
+                            .setThumbnail(
+                                user.displayAvatarURL({
+                                    size: 256
+                                })
+                            )
+                            .addFields(
+                                fields
+                            )
+                            .setColor(
+                                0x5865F2
+                            )
+                    ]
+                });
+
+                return;
+            }
+
+            // ==========================================
+            // /serverinfo
+            // ==========================================
+
+            if (
+                interaction.commandName ===
+                'serverinfo'
+            ) {
+
+                const guild =
+                    interaction.guild;
+
+                const embed =
+                    new EmbedBuilder()
+                        .setTitle(
+                            `🏠 ${guild.name}`
+                        )
+                        .addFields(
+                            {
+                                name: '🆔 ID',
+                                value:
+                                    `\`${guild.id}\``
+                            },
+                            {
+                                name:
+                                    '👥 Membres',
+                                value:
+                                    String(
+                                        guild.memberCount
+                                    )
+                            },
+                            {
+                                name:
+                                    '💬 Salons',
+                                value:
+                                    String(
+                                        guild.channels.cache.size
+                                    )
+                            },
+                            {
+                                name:
+                                    '🚀 Boosts',
+                                value:
+                                    String(
+                                        guild.premiumSubscriptionCount ||
+                                        0
+                                    )
+                            },
+                            {
+                                name:
+                                    '📅 Création',
+                                value:
+                                    `<t:${Math.floor(
+                                        guild.createdTimestamp /
+                                        1000
+                                    )}:F>`
+                            }
+                        )
+                        .setColor(
+                            0x5865F2
+                        );
+
+                const icon =
+                    guild.iconURL({
+                        size: 256
+                    });
+
+                if (icon) {
+                    embed.setThumbnail(
+                        icon
+                    );
+                }
+
+                await interaction.reply({
+                    embeds: [
+                        embed
+                    ]
+                });
+
+                return;
+            }
+
+            // ==========================================
+            // /botinfo
+            // ==========================================
+
+            if (
+                interaction.commandName ===
+                'botinfo'
+            ) {
+
+                await interaction.reply({
+                    embeds: [
+                        new EmbedBuilder()
+                            .setTitle(
+                                '🤖 KTR.BOT'
+                            )
+                            .addFields(
+                                {
+                                    name:
+                                        '🏓 Ping',
+                                    value:
+                                        `${client.ws.ping} ms`
+                                },
+                                {
+                                    name:
+                                        '⏱️ Uptime',
+                                    value:
+                                        formatUptime(
+                                            client.uptime ||
+                                            0
+                                        )
+                                },
+                                {
+                                    name:
+                                        '🏠 Serveurs',
+                                    value:
+                                        String(
+                                            client.guilds.cache.size
+                                        )
+                                },
+                                {
+                                    name:
+                                        '📦 discord.js',
+                                    value:
+                                        discordJsVersion
+                                },
+                                {
+                                    name:
+                                        '🤖 IA',
+                                    value:
+                                        process.env.OPENAI_API_KEY
+                                            ? 'Activée'
+                                            : 'Non configurée'
+                                }
+                            )
+                            .setColor(
+                                0x5865F2
+                            )
+                    ]
+                });
+
+                return;
+            }
+
+            // ==========================================
+            // /channelinfo
+            // ==========================================
+
+            if (
+                interaction.commandName ===
+                'channelinfo'
+            ) {
+
+                const channel =
+                    interaction.options.getChannel(
+                        'salon'
+                    );
+
+                await interaction.reply({
+                    embeds: [
+                        new EmbedBuilder()
+                            .setTitle(
+                                `📺 ${channel.name}`
+                            )
+                            .addFields(
+                                {
+                                    name:
+                                        '🆔 ID',
+                                    value:
+                                        `\`${channel.id}\``
+                                },
+                                {
+                                    name:
+                                        '📁 Type',
+                                    value:
+                                        String(
+                                            channel.type
+                                        )
+                                }
+                            )
+                            .setColor(
+                                0x5865F2
+                            )
+                    ]
+                });
+
+                return;
+            }
+
+            // ==========================================
+            // /grosfdp /rejoin
+            // ==========================================
+
+            if (
+                interaction.commandName ===
+                    'grosfdp' ||
+                interaction.commandName ===
+                    'rejoin'
+            ) {
+
+                const member =
+                    interaction.member;
+
+                const channel =
+                    member?.voice?.channel;
+
+                if (!channel) {
+                    await interaction.reply({
+                        content:
+                            '❌ Tu dois être dans un vocal.',
+                        flags:
+                            MessageFlags.Ephemeral
+                    });
+
+                    return;
+                }
+
+                const oldConnection =
+                    getVoiceConnection(
+                        interaction.guild.id
+                    );
+
+                if (oldConnection) {
+                    oldConnection.destroy();
+                }
+
+                connectToVoice(
+                    channel
+                );
+
+                await interaction.reply(
+                    `✅ Rejoint **${channel.name}** 🔇🎧`
+                );
+
+                return;
+            }
+
+            // ==========================================
+            // /fdp
+            // ==========================================
+
+            if (
+                interaction.commandName ===
+                'fdp'
+            ) {
+
+                const connection =
+                    getVoiceConnection(
+                        interaction.guild.id
+                    );
+
+                if (!connection) {
+                    await interaction.reply({
+                        content:
+                            '❌ Je ne suis dans aucun vocal.',
+                        flags:
+                            MessageFlags.Ephemeral
+                    });
+
+                    return;
+                }
+
+                connection.destroy();
+
+                await interaction.reply(
+                    '👋 J’ai quitté le vocal.'
+                );
+
+                return;
+            }
+
+            // ==========================================
+            // /parle
+            // ==========================================
+
+            if (
+                interaction.commandName ===
+                'parle'
+            ) {
+
+                const channel =
+                    await client.channels.fetch(
+                        GENERAL_CHANNEL_ID
+                    );
+
+                if (
+                    !channel ||
+                    !channel.isTextBased()
+                ) {
+                    await interaction.reply({
+                        content:
+                            '❌ Salon général introuvable.',
+                        flags:
+                            MessageFlags.Ephemeral
+                    });
+
+                    return;
+                }
+
+                await channel.send(
+                    'Suis un fdp 💀'
+                );
+
+                await interaction.reply({
+                    content:
+                        '✅ Message envoyé.',
+                    flags:
+                        MessageFlags.Ephemeral
+                });
+
+                return;
+            }
+
+            // ==========================================
+            // /compteur
+            // ==========================================
+
+            if (
+                interaction.commandName ===
+                'compteur'
+            ) {
+
+                if (counting) {
+                    await interaction.reply({
+                        content:
+                            '⚠️ Le compteur tourne déjà.',
+                        flags:
+                            MessageFlags.Ephemeral
+                    });
+
+                    return;
+                }
+
+                await startCounter();
+
+                await interaction.reply({
+                    content:
+                        `✅ Compteur lancé à **${count - 1}**.`,
+                    flags:
+                        MessageFlags.Ephemeral
+                });
+
+                return;
+            }
+
+            // ==========================================
+            // /stopcompteur
+            // ==========================================
+
+            if (
+                interaction.commandName ===
+                'stopcompteur'
+            ) {
+
+                if (!counting) {
+                    await interaction.reply({
+                        content:
+                            `❌ Déjà arrêté à **${count - 1}**.`,
+                        flags:
+                            MessageFlags.Ephemeral
+                    });
+
+                    return;
+                }
+
+                const lastNumber =
+                    count - 1;
+
+                stopCounter();
+
+                await interaction.reply({
+                    content:
+                        `🛑 Compteur arrêté à **${lastNumber}**.`,
+                    flags:
+                        MessageFlags.Ephemeral
+                });
+
+                return;
+            }
+
+            // ==========================================
+            // /steamid
+            // ==========================================
+
+            if (
+                interaction.commandName ===
+                'steamid'
+            ) {
+
+                if (
+                    interaction.channelId !==
+                    STEAM_CHANNEL_ID
+                ) {
+                    await interaction.reply({
+                        content:
+                            '❌ Utilise `/steamid` dans le salon Steam.',
+                        flags:
+                            MessageFlags.Ephemeral
+                    });
+
+                    return;
+                }
+
+                const gameName =
+                    interaction.options.getString(
+                        'jeu'
+                    );
+
+                await interaction.deferReply();
+
+                const results =
+                    await searchSteamGame(
+                        gameName
+                    );
+
+                if (!results.length) {
+                    await interaction.editReply(
+                        `❌ Aucun jeu trouvé pour **${gameName}**.`
+                    );
+
+                    return;
+                }
+
+                const best =
+                    results[0];
+
+                let description =
+                    `🎮 **${best.name}**\n` +
+                    `🆔 **Steam App ID :** \`${best.id}\`\n\n` +
+                    `[🔗 Ouvrir sur Steam](https://store.steampowered.com/app/${best.id}/)`;
+
+                if (
+                    results.length >
+                    1
+                ) {
+                    description +=
+                        '\n\n**Autres résultats :**\n';
+
+                    for (
+                        const game of
+                        results.slice(1)
+                    ) {
+                        description +=
+                            `• ${game.name} — \`${game.id}\`\n`;
+                    }
+                }
+
+                await interaction.editReply({
+                    embeds: [
+                        new EmbedBuilder()
+                            .setTitle(
+                                '🔎 Recherche Steam'
+                            )
+                            .setDescription(
+                                description
+                            )
+                            .setColor(
+                                0x5865F2
+                            )
+                    ]
+                });
+
+                return;
+            }
+
+            // ==========================================
+            // /onlinefix
+            // ==========================================
+
+            if (
+                interaction.commandName ===
+                'onlinefix'
+            ) {
+
+                await interaction.reply({
+                    embeds: [
+                        new EmbedBuilder()
+                            .setTitle(
+                                '⚡ Project Lightning'
+                            )
+                            .setDescription(
+                                '[🌐 Ouvrir Project Lightning](https://project-lightning-web.vercel.app)'
+                            )
+                            .setColor(
+                                0x5865F2
+                            )
+                    ]
+                });
+
+                return;
+            }
+
+            // ==========================================
+            // /spotifyfree
+            // ==========================================
+
+            if (
+                interaction.commandName ===
+                'spotifyfree'
+            ) {
+
+                await interaction.reply({
+                    embeds: [
+                        new EmbedBuilder()
+                            .setTitle(
+                                '🎵 Spicetify'
+                            )
+                            .setDescription(
+                                '[🌐 Ouvrir Spicetify](https://spicetify.app)'
+                            )
+                            .setColor(
+                                0x5865F2
+                            )
+                    ]
+                });
+
+                return;
+            }
+
+            // ==========================================
+            // /pluginsteam
+            // ==========================================
+
+            if (
+                interaction.commandName ===
+                'pluginsteam'
+            ) {
+
+                await interaction.reply({
+                    embeds: [
+                        new EmbedBuilder()
+                            .setTitle(
+                                '🧩 Plugins Steam'
+                            )
+                            .setDescription(
+                                '[🌐 Ouvrir SteamBrew](https://steambrew.app)'
+                            )
+                            .setColor(
+                                0x5865F2
+                            )
+                    ]
+                });
+
+                return;
+            }
+
+            // ==========================================
+            // /panel
+            // ==========================================
+
+            if (
+                interaction.commandName ===
+                'panel'
+            ) {
+
+                const channel =
+                    await client.channels.fetch(
+                        PANEL_CHANNEL_ID
+                    );
+
+                if (
+                    !channel ||
+                    !channel.isTextBased()
+                ) {
+                    await interaction.reply({
+                        content:
+                            '❌ Salon panneau introuvable.',
+                        flags:
+                            MessageFlags.Ephemeral
+                    });
+
+                    return;
+                }
+
+                await channel.send(
+                    createPanel()
+                );
+
+                await interaction.reply({
+                    content:
+                        '✅ Panneau envoyé.',
+                    flags:
+                        MessageFlags.Ephemeral
+                });
+
+                return;
+            }
+
+            // ==========================================
+            // /say
+            // ==========================================
+
+            if (
+                interaction.commandName ===
+                'say'
+            ) {
+
+                const text =
+                    interaction.options.getString(
+                        'texte'
+                    );
+
+                await interaction.channel.send(
+                    text
+                );
+
+                await interaction.reply({
+                    content:
+                        '✅ Message envoyé.',
+                    flags:
+                        MessageFlags.Ephemeral
+                });
+
+                return;
+            }
+
+            // ==========================================
+            // /kick
+            // ==========================================
+
+            if (
+                interaction.commandName ===
+                'kick'
+            ) {
+
+                const user =
+                    interaction.options.getUser(
+                        'membre'
+                    );
+
+                const member =
+                    await interaction.guild.members
+                        .fetch(
+                            user.id
+                        )
+                        .catch(
+                            () => null
+                        );
+
+                if (
+                    !member ||
+                    !member.kickable
+                ) {
+                    await interaction.reply({
+                        content:
+                            '❌ Je ne peux pas expulser ce membre.',
+                        flags:
+                            MessageFlags.Ephemeral
+                    });
+
+                    return;
+                }
+
+                const reason =
+                    interaction.options.getString(
+                        'raison'
+                    ) ||
+                    'Aucune raison';
+
+                await member.kick(
+                    reason
+                );
+
+                await interaction.reply(
+                    `👢 **${user.tag}** a été expulsé.\nRaison : ${reason}`
+                );
+
+                return;
+            }
+
+            // ==========================================
+            // /ban
+            // ==========================================
+
+            if (
+                interaction.commandName ===
+                'ban'
+            ) {
+
+                const user =
+                    interaction.options.getUser(
+                        'membre'
+                    );
+
+                const member =
+                    await interaction.guild.members
+                        .fetch(
+                            user.id
+                        )
+                        .catch(
+                            () => null
+                        );
+
+                if (
+                    member &&
+                    !member.bannable
+                ) {
+                    await interaction.reply({
+                        content:
+                            '❌ Je ne peux pas bannir ce membre.',
+                        flags:
+                            MessageFlags.Ephemeral
+                    });
+
+                    return;
+                }
+
+                const reason =
+                    interaction.options.getString(
+                        'raison'
+                    ) ||
+                    'Aucune raison';
+
+                await interaction.guild.members.ban(
+                    user.id,
+                    {
+                        reason
+                    }
+                );
+
+                await interaction.reply(
+                    `🔨 **${user.tag}** a été banni.\nRaison : ${reason}`
+                );
+
+                return;
+            }
+
+            // ==========================================
+            // /timeout
+            // ==========================================
+
+            if (
+                interaction.commandName ===
+                'timeout'
+            ) {
+
+                const user =
+                    interaction.options.getUser(
+                        'membre'
+                    );
+
+                const member =
+                    await interaction.guild.members
+                        .fetch(
+                            user.id
+                        )
+                        .catch(
+                            () => null
+                        );
+
+                if (
+                    !member ||
+                    !member.moderatable
+                ) {
+                    await interaction.reply({
+                        content:
+                            '❌ Je ne peux pas exclure ce membre.',
+                        flags:
+                            MessageFlags.Ephemeral
+                    });
+
+                    return;
+                }
+
+                const seconds =
+                    interaction.options.getInteger(
+                        'secondes'
+                    );
+
+                const reason =
+                    interaction.options.getString(
+                        'raison'
+                    ) ||
+                    'Aucune raison';
+
+                await member.timeout(
+                    seconds * 1000,
+                    reason
+                );
+
+                await interaction.reply(
+                    `⏱️ **${user.tag}** est exclu pendant **${seconds} seconde(s)**.`
+                );
+
+                return;
+            }
+
+            // ==========================================
+            // /untimeout
+            // ==========================================
+
+            if (
+                interaction.commandName ===
+                'untimeout'
+            ) {
+
+                const user =
+                    interaction.options.getUser(
+                        'membre'
+                    );
+
+                const member =
+                    await interaction.guild.members
+                        .fetch(
+                            user.id
+                        )
+                        .catch(
+                            () => null
+                        );
+
+                if (
+                    !member ||
+                    !member.moderatable
+                ) {
+                    await interaction.reply({
+                        content:
+                            '❌ Je ne peux pas modifier ce membre.',
+                        flags:
+                            MessageFlags.Ephemeral
+                    });
+
+                    return;
+                }
+
+                await member.timeout(
+                    null,
+                    'Exclusion temporaire retirée'
+                );
+
+                await interaction.reply(
+                    `✅ Exclusion retirée pour **${user.tag}**.`
+                );
+
+                return;
+            }
+
+            // ==========================================
+            // /8ball
+            // ==========================================
+
+            if (
+                interaction.commandName ===
+                '8ball'
+            ) {
+
+                const answers = [
+                    'Oui.',
+                    'Non.',
+                    'Peut-être.',
+                    'Certainement.',
+                    'Pas du tout.',
+                    'Je ne sais pas 😭'
+                ];
+
+                const question =
+                    interaction.options.getString(
+                        'question'
+                    );
+
+                const answer =
+                    answers[
+                        Math.floor(
+                            Math.random() *
+                            answers.length
+                        )
+                    ];
+
+                await interaction.reply(
+                    `🎱 **${question}**\n→ ${answer}`
+                );
+
+                return;
+            }
+
+            // ==========================================
+            // /coinflip
+            // ==========================================
+
+            if (
+                interaction.commandName ===
+                'coinflip'
+            ) {
+
+                const result =
+                    Math.random() < 0.5
+                        ? 'Pile'
+                        : 'Face';
+
+                await interaction.reply(
+                    `🪙 **${result}**`
+                );
+
+                return;
+            }
+
+            // ==========================================
+            // /roll
+            // ==========================================
+
+            if (
+                interaction.commandName ===
+                'roll'
+            ) {
+
+                const max =
+                    interaction.options.getInteger(
+                        'max'
+                    ) ||
+                    100;
+
+                const result =
+                    Math.floor(
+                        Math.random() *
+                        max
+                    ) + 1;
+
+                await interaction.reply(
+                    `🎲 **${result}** / ${max}`
+                );
+
+                return;
+            }
+
+            // ==========================================
+            // /random
+            // ==========================================
+
+            if (
+                interaction.commandName ===
+                'random'
+            ) {
+
+                let min =
+                    interaction.options.getInteger(
+                        'min'
+                    );
+
+                let max =
+                    interaction.options.getInteger(
+                        'max'
+                    );
+
+                if (min > max) {
+                    [
+                        min,
+                        max
+                    ] = [
+                        max,
+                        min
+                    ];
+                }
+
+                const result =
+                    Math.floor(
+                        Math.random() *
+                        (
+                            max -
+                            min +
+                            1
+                        )
+                    ) + min;
+
+                await interaction.reply(
+                    `🎯 **${result}**`
+                );
+
+                return;
+            }
+
+            // ==========================================
+            // /clear10 -> /clear100
+            // ==========================================
+
+            const clearMatch =
+                interaction.commandName.match(
+                    /^clear(10|20|30|40|50|60|70|80|90|100)$/
+                );
+
+            if (clearMatch) {
+
+                const amount =
+                    Number(
+                        clearMatch[1]
+                    );
+
+                if (
+                    !interaction.memberPermissions?.has(
+                        PermissionFlagsBits.ManageMessages
+                    )
+                ) {
+                    await interaction.reply({
+                        content:
+                            '❌ Tu dois avoir **Gérer les messages**.',
+                        flags:
+                            MessageFlags.Ephemeral
+                    });
+
+                    return;
+                }
+
+                const botMember =
+                    interaction.guild.members.me;
+
+                if (
+                    !botMember?.permissions.has(
+                        PermissionFlagsBits.ManageMessages
+                    )
+                ) {
+                    await interaction.reply({
+                        content:
+                            '❌ Je dois avoir **Gérer les messages**.',
+                        flags:
+                            MessageFlags.Ephemeral
+                    });
+
+                    return;
+                }
+
+                if (
+                    !interaction.channel ||
+                    !interaction.channel.isTextBased()
+                ) {
+                    await interaction.reply({
+                        content:
+                            '❌ Cette commande ne fonctionne pas ici.',
+                        flags:
+                            MessageFlags.Ephemeral
+                    });
+
+                    return;
+                }
+
+                const deleted =
+                    await interaction.channel.bulkDelete(
+                        amount,
+                        true
+                    );
+
+                await interaction.reply({
+                    content:
+                        `🧹 **${deleted.size}** message(s) supprimé(s).`,
+                    flags:
+                        MessageFlags.Ephemeral
+                });
+
+                return;
+            }
+
+        } catch (error) {
+
+            console.error(
+                '❌ Interaction error :',
+                error
+            );
+
+            if (
+                interaction.replied ||
+                interaction.deferred
+            ) {
+                await interaction.editReply(
+                    '❌ Une erreur est survenue.'
+                );
+            } else {
+                await interaction.reply({
+                    content:
+                        '❌ Une erreur est survenue.',
+                    flags:
+                        MessageFlags.Ephemeral
+                });
+            }
+        }
+    }
+);
+
+// ==================================================
+// ERREURS
+// ==================================================
+
+process.on(
+    'unhandledRejection',
+    error => {
+        console.error(
+            '❌ Unhandled Rejection :',
+            error
+        );
+    }
+);
+
+process.on(
+    'uncaughtException',
+    error => {
+        console.error(
+            '❌ Uncaught Exception :',
+            error
+        );
+    }
+);
+
+// ==================================================
+// VÉRIFICATIONS
+// ==================================================
+
+if (!process.env.TOKEN) {
+    console.error(
+        '❌ TOKEN absent du fichier .env'
+    );
+
+    process.exit(1);
+}
+
+if (!process.env.OPENAI_API_KEY) {
+    console.warn(
+        '⚠️ OPENAI_API_KEY absent. Le bot démarrera, mais /ia sera désactivé.'
+    );
+}
+
+// ==================================================
+// LOGIN
+// ==================================================
+
+client.login(
+    process.env.TOKEN
+);
