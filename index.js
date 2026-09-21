@@ -42,7 +42,7 @@ const client = new Client({
 // GEMINI
 // ==================================================
 
-const GEMINI_MODEL = 'gemini-2.5-flash';
+const GEMINI_MODEL = 'gemini-3.6-flash';
 
 const gemini = process.env.GEMINI_API_KEY
     ? new GoogleGenAI({
