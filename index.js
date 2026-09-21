@@ -1111,6 +1111,94 @@ client.once(
 // INTERACTIONS
 // ==================================================
 
+// ==================================================
+// MODE CONVERSATION IA
+// ==================================================
+// /ia lance la conversation. Ensuite, les messages normaux
+// dans le salon IA sont envoyés à l'IA sans refaire /ia.
+// Chaque message remet le délai de 2 minutes à zéro.
+client.on(
+    'messageCreate',
+    async message => {
+
+        if (
+            message.author.bot ||
+            message.channelId !== activeAIChannelId ||
+            !message.content ||
+            message.content.startsWith('/')
+        ) {
+            return;
+        }
+
+        const history =
+            aiHistory.get(
+                activeAIChannelId
+            );
+
+        // La conversation doit d'abord être lancée avec /ia.
+        if (
+            !history ||
+            history.length === 0
+        ) {
+            return;
+        }
+
+        if (!process.env.OPENAI_API_KEY) {
+            return;
+        }
+
+        try {
+
+            await message.channel.sendTyping();
+
+            const answer =
+                await askAI(
+                    activeAIChannelId,
+                    message.content,
+                    message.author.username
+                );
+
+            resetAIInactivityTimer();
+
+            if (answer.length <= 2000) {
+                await message.reply(
+                    answer
+                );
+            } else {
+
+                const parts =
+                    answer.match(
+                        /.{1,1900}/gs
+                    ) || [];
+
+                await message.reply(
+                    parts[0]
+                );
+
+                for (
+                    const part of
+                    parts.slice(1)
+                ) {
+                    await message.channel.send(
+                        part
+                    );
+                }
+            }
+
+        } catch (error) {
+
+            console.error(
+                '❌ Erreur IA message normal :',
+                error
+            );
+
+            await message.reply(
+                '❌ Une erreur est survenue avec l’IA.'
+            ).catch(() => {});
+        }
+    }
+);
+
 client.on(
     'interactionCreate',
     async interaction => {
@@ -1186,7 +1274,7 @@ client.on(
                 if (!process.env.OPENAI_API_KEY) {
                     await interaction.reply({
                         content:
-                            '❌ La clé OpenAI n’est pas configurée dans `.env`.',
+                            '❌ La clé OpenAI n’est pas configurée.',
                         flags:
                             MessageFlags.Ephemeral
                     });
@@ -1208,10 +1296,8 @@ client.on(
                         interaction.user.username
                     );
 
-                // Chaque nouvelle question repousse le délai de 2 minutes.
                 resetAIInactivityTimer();
 
-                // Discord limite les messages à 2000 caractères
                 if (answer.length <= 2000) {
                     await interaction.editReply(
                         answer
@@ -1256,7 +1342,7 @@ client.on(
                         .setDescription(
                             '**🤖 IA**\n' +
                             '`/ia question:`\n' +
-                            'Le salon est renouvelé après 2 minutes sans nouvelle question.\n\n' +
+                            'Fais `/ia` une fois, puis parle normalement. Le salon est renouvelé après 2 minutes sans message.\n\n' +
 
                             '**🔊 Vocal**\n' +
                             '`/grosfdp` `/rejoin` `/fdp`\n\n' +
