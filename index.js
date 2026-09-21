@@ -55,116 +55,31 @@ const gemini = process.env.GEMINI_API_KEY
 // ==================================================
 
 const GUILD_ID = '1547964026854580235';
-const VOICE_CHANNEL_ID = '1547964030105161753';
-const GENERAL_CHANNEL_ID = '1547964030105161752';
-const COUNT_CHANNEL_ID = '1551661714129428630';
-const STEAM_CHANNEL_ID = '1548402848302243922';
-const PANEL_CHANNEL_ID = '1548642071290839140';
-const AI_CHANNEL_ID = '1551633371787038840';
 
-const AI_TIMEOUT_MS = 2 * 60 * 1000;
+const VOICE_CHANNEL_ID = '1547964030105161753';
+
+const GENERAL_CHANNEL_ID = '1547964030105161752';
+
+const COUNT_CHANNEL_ID = '1551661714129428630';
+
+const STEAM_CHANNEL_ID = '1548402848302243922';
+
+const PANEL_CHANNEL_ID = '1548642071290839140';
+
+const AI_CHANNEL_ID = '1551633371787038840';
+const AI_TIMEOUT_MS = 2 * 60 * 1000; // 2 minutes sans nouveau message
 
 let activeAIChannelId = AI_CHANNEL_ID;
 let aiInactivityTimer = null;
-
 const aiChannelTimers = new Map();
-const aiHistory = new Map();
-
-const MAX_HISTORY = 12;
-
-// ==================================================
-// OUTILS INTERACTION
-// ==================================================
-
-function isInteractionGone(error) {
-    return (
-        error?.code === 10062 ||
-        error?.code === 40060 ||
-        error?.status === 404 ||
-        error?.message?.includes('Unknown interaction') ||
-        error?.message?.includes('already been acknowledged')
-    );
-}
-
-async function safeDefer(interaction) {
-    if (interaction.replied || interaction.deferred) {
-        return true;
-    }
-
-    try {
-        await interaction.deferReply();
-        return true;
-    } catch (error) {
-        if (isInteractionGone(error)) {
-            console.warn(
-                '⚠️ Interaction déjà traitée ou expirée.'
-            );
-            return false;
-        }
-
-        console.error(
-            '❌ Erreur deferReply :',
-            error
-        );
-
-        return false;
-    }
-}
-
-async function safeReply(interaction, data) {
-    if (!interaction || !interaction.isRepliable()) {
-        return false;
-    }
-
-    try {
-        if (interaction.deferred || interaction.replied) {
-            await interaction.editReply(data);
-        } else {
-            await interaction.reply(data);
-        }
-
-        return true;
-    } catch (error) {
-        if (!isInteractionGone(error)) {
-            console.error(
-                '❌ Erreur réponse interaction :',
-                error
-            );
-        }
-
-        return false;
-    }
-}
-
-async function safeEditReply(interaction, data) {
-    try {
-        if (
-            !interaction.replied &&
-            !interaction.deferred
-        ) {
-            return await safeReply(
-                interaction,
-                data
-            );
-        }
-
-        await interaction.editReply(data);
-        return true;
-    } catch (error) {
-        if (!isInteractionGone(error)) {
-            console.error(
-                '❌ Erreur editReply :',
-                error
-            );
-        }
-
-        return false;
-    }
-}
 
 // ==================================================
 // HISTORIQUE IA
 // ==================================================
+
+const aiHistory = new Map();
+
+const MAX_HISTORY = 12;
 
 function getHistory(channelId) {
     if (!aiHistory.has(channelId)) {
@@ -188,74 +103,52 @@ function addHistory(channelId, role, content) {
 }
 
 // ==================================================
-// SALON IA
+// GESTION DU SALON IA
 // ==================================================
 
-function clearAIInactivityTimer(channelId) {
-    if (!channelId) {
-        channelId = activeAIChannelId;
-    }
-
-    if (
-        channelId === activeAIChannelId &&
-        aiInactivityTimer
-    ) {
+function clearAIInactivityTimer(channelId = activeAIChannelId) {
+    if (channelId === activeAIChannelId && aiInactivityTimer) {
         clearTimeout(aiInactivityTimer);
         aiInactivityTimer = null;
     }
 
     const timer = aiChannelTimers.get(channelId);
-
     if (timer) {
         clearTimeout(timer);
         aiChannelTimers.delete(channelId);
     }
 }
 
-function resetAIInactivityTimer(channelId) {
+function resetAIInactivityTimer(channelId = activeAIChannelId) {
     clearAIInactivityTimer(channelId);
 
+    // Le salon IA automatique (#ia) est recréé après 2 minutes.
     if (channelId === activeAIChannelId) {
         aiInactivityTimer = setTimeout(
             async () => {
-                try {
-                    await closeAndRecreateAIChannel();
-                } catch (error) {
-                    console.error(
-                        '❌ Erreur renouvellement IA :',
-                        error
-                    );
-                }
+                await closeAndRecreateAIChannel();
             },
             AI_TIMEOUT_MS
         );
-
         return;
     }
 
+    // Dans les autres salons, on efface seulement l'historique.
+    // Le bot ne supprimera jamais un salon qui n'est pas son #ia automatique.
     const timer = setTimeout(
         () => {
             aiHistory.delete(channelId);
             aiChannelTimers.delete(channelId);
-
-            console.log(
-                `🧠 Historique IA supprimé pour ${channelId}.`
-            );
+            console.log(`🧠 Historique IA effacé pour le salon ${channelId} après 2 minutes.`);
         },
         AI_TIMEOUT_MS
     );
 
-    aiChannelTimers.set(
-        channelId,
-        timer
-    );
+    aiChannelTimers.set(channelId, timer);
 }
 
 async function findOrCreateAIChannel(guild) {
-    let channel =
-        guild.channels.cache.get(
-            activeAIChannelId
-        );
+    let channel = guild.channels.cache.get(activeAIChannelId);
 
     if (
         channel &&
@@ -264,30 +157,28 @@ async function findOrCreateAIChannel(guild) {
         return channel;
     }
 
-    channel =
-        guild.channels.cache.find(
-            ch =>
-                ch.type === ChannelType.GuildText &&
-                ch.name === 'ia'
-        );
+    channel = guild.channels.cache.find(
+        channel =>
+            channel.type === ChannelType.GuildText &&
+            channel.name === 'ia'
+    );
 
     if (channel) {
         activeAIChannelId = channel.id;
         return channel;
     }
 
-    channel =
-        await guild.channels.create({
-            name: 'ia',
-            type: ChannelType.GuildText,
-            reason: 'Création du salon IA'
-        });
+    channel = await guild.channels.create({
+        name: 'ia',
+        type: ChannelType.GuildText,
+        reason: 'Création du salon IA'
+    });
 
     activeAIChannelId = channel.id;
 
     await channel.send(
         '🤖 **Nouveau salon IA prêt !**\n' +
-        'Utilise `/ia question:` pour commencer.'
+        'Utilisez `/ia question:` pour poser vos questions.'
     );
 
     return channel;
@@ -296,42 +187,29 @@ async function findOrCreateAIChannel(guild) {
 async function closeAndRecreateAIChannel() {
     clearAIInactivityTimer();
 
-    const oldChannelId =
-        activeAIChannelId;
+    const oldChannelId = activeAIChannelId;
 
     try {
+        const oldChannel =
+            await client.channels.fetch(oldChannelId).catch(() => null);
+
         const guild =
-            client.guilds.cache.get(
-                GUILD_ID
-            );
+            client.guilds.cache.get(GUILD_ID);
 
         if (!guild) {
-            console.error(
-                '❌ Serveur introuvable.'
-            );
+            console.error('❌ Serveur introuvable pour recréer le salon IA.');
             return;
         }
-
-        const oldChannel =
-            await client.channels
-                .fetch(oldChannelId)
-                .catch(() => null);
 
         let permissionOverwrites;
 
         if (
-            oldChannel?.permissionOverwrites?.cache
+            oldChannel &&
+            oldChannel.permissionOverwrites?.cache
         ) {
             permissionOverwrites =
-                [
-                    ...oldChannel
-                        .permissionOverwrites
-                        .cache
-                        .values()
-                ].map(
-                    overwrite =>
-                        overwrite.toJSON()
-                );
+                [...oldChannel.permissionOverwrites.cache.values()]
+                    .map(overwrite => overwrite.toJSON());
         }
 
         const newChannel =
@@ -339,28 +217,26 @@ async function closeAndRecreateAIChannel() {
                 name: 'ia',
                 type: ChannelType.GuildText,
                 parent:
-                    oldChannel?.parentId ||
+                    oldChannel?.parentId ??
                     undefined,
                 permissionOverwrites,
                 reason:
-                    'Renouvellement du salon IA après 2 minutes'
+                    'Nouvelle conversation IA après 2 minutes sans question'
             });
 
-        activeAIChannelId =
-            newChannel.id;
+        activeAIChannelId = newChannel.id;
 
-        aiHistory.delete(
-            oldChannelId
-        );
+        // L'ancien historique est définitivement oublié.
+        aiHistory.delete(oldChannelId);
 
         await newChannel.send({
             content:
                 '@everyone\n\n' +
                 '🔒 **Conversation terminée.**\n' +
-                'Aucune question pendant **2 minutes**.\n\n' +
-                '🧠 L’historique précédent a été supprimé.\n\n' +
-                '🤖 **Nouvelle conversation ouverte !**\n' +
-                'Utilise `/ia question:` pour commencer.',
+                'Aucune nouvelle question n’a été posée pendant **2 minutes**.\n\n' +
+                '🧠 L’historique de la conversation précédente a été supprimé.\n\n' +
+                '🤖 **Une nouvelle conversation est maintenant ouverte !**\n' +
+                'Utilisez `/ia question:` pour commencer.',
             allowedMentions: {
                 parse: ['everyone']
             }
@@ -368,10 +244,11 @@ async function closeAndRecreateAIChannel() {
 
         if (
             oldChannel &&
+            typeof oldChannel.delete === 'function' &&
             oldChannel.deletable
         ) {
             await oldChannel.delete(
-                'Conversation IA terminée après 2 minutes'
+                'Conversation IA terminée après 2 minutes sans nouveau message'
             );
         }
 
@@ -379,276 +256,50 @@ async function closeAndRecreateAIChannel() {
             `🤖 Salon IA renouvelé : ${newChannel.id}`
         );
 
+        // Le chrono repartira à la prochaine question.
         aiInactivityTimer = null;
 
     } catch (error) {
         console.error(
-            '❌ Impossible de renouveler le salon IA :',
+            '❌ Impossible de recréer le salon IA :',
             error
         );
 
-        aiHistory.delete(
-            oldChannelId
-        );
-
+        aiHistory.delete(oldChannelId);
         aiInactivityTimer = null;
     }
-}
-
-// ==================================================
-// IA GEMINI
-// ==================================================
-
-async function askAI(
-    channelId,
-    question,
-    userName,
-    imageUrls = []
-) {
-    if (!gemini) {
-        throw new Error(
-            'GEMINI_API_KEY absente.'
-        );
-    }
-
-    const history =
-        getHistory(channelId);
-
-    const systemPrompt = `
-Tu es KTR.BOT, un assistant IA intégré à Discord.
-
-Tu réponds en français sauf si l'utilisateur demande une autre langue.
-
-Tu aides notamment pour :
-- programmation JavaScript / Node.js / Python
-- bots Discord
-- dépannage informatique
-- erreurs de code
-- configuration PC
-- jeux vidéo
-- questions générales
-- projets
-
-Tu peux analyser les images.
-
-Quand une image est fournie :
-- regarde attentivement ce qui est visible
-- lis le texte visible quand c'est possible
-- réponds à la question avec les informations visibles
-- ne prétends jamais voir quelque chose qui n'est pas visible
-
-Quand tu fournis du code :
-- donne du code complet si nécessaire
-- explique où le mettre
-- évite de supprimer des fonctionnalités sans raison
-- donne des solutions simples et fonctionnelles
-
-Sois direct, utile et clair.
-
-Utilisateur Discord :
-${userName}
-`;
-
-    const contents =
-        history.map(item => ({
-            role:
-                item.role === 'assistant'
-                    ? 'model'
-                    : 'user',
-            parts: [
-                {
-                    text:
-                        typeof item.content === 'string'
-                            ? item.content
-                            : '[Image]'
-                }
-            ]
-        }));
-
-    const currentParts = [];
-
-    if (
-        typeof question === 'string' &&
-        question.trim()
-    ) {
-        currentParts.push({
-            text: question.trim()
-        });
-    }
-
-    if (
-        !currentParts.length &&
-        imageUrls.length
-    ) {
-        currentParts.push({
-            text:
-                'Analyse cette image.'
-        });
-    }
-
-    for (
-        const imageUrl of imageUrls.slice(0, 5)
-    ) {
-        try {
-            const response =
-                await fetch(imageUrl);
-
-            if (!response.ok) {
-                continue;
-            }
-
-            const buffer =
-                Buffer.from(
-                    await response.arrayBuffer()
-                );
-
-            if (
-                buffer.length >
-                4 * 1024 * 1024
-            ) {
-                console.warn(
-                    '⚠️ Image trop grosse.'
-                );
-                continue;
-            }
-
-            const mimeType =
-                (
-                    response.headers.get(
-                        'content-type'
-                    ) ||
-                    'image/jpeg'
-                ).split(';')[0];
-
-            if (
-                !mimeType.startsWith(
-                    'image/'
-                )
-            ) {
-                continue;
-            }
-
-            currentParts.push({
-                inlineData: {
-                    mimeType,
-                    data:
-                        buffer.toString(
-                            'base64'
-                        )
-                }
-            });
-
-        } catch (error) {
-            console.error(
-                '❌ Erreur récupération image :',
-                error
-            );
-        }
-    }
-
-    if (!currentParts.length) {
-        currentParts.push({
-            text:
-                question ||
-                'Bonjour.'
-        });
-    }
-
-    contents.push({
-        role: 'user',
-        parts: currentParts
-    });
-
-    console.log(
-        `🤖 Question Gemini dans ${channelId}`
-    );
-
-    let response;
-
-    try {
-        response =
-            await gemini.models.generateContent({
-                model: GEMINI_MODEL,
-                contents,
-                config: {
-                    systemInstruction:
-                        systemPrompt
-                }
-            });
-    } catch (error) {
-        console.error(
-            '❌ ERREUR GEMINI :',
-            error
-        );
-
-        throw error;
-    }
-
-    const answer =
-        response.text?.trim();
-
-    if (!answer) {
-        throw new Error(
-            'Gemini a renvoyé une réponse vide.'
-        );
-    }
-
-    addHistory(
-        channelId,
-        'user',
-        imageUrls.length
-            ? `${question || 'Analyse cette image.'}\n[Image envoyée]`
-            : question
-    );
-
-    addHistory(
-        channelId,
-        'assistant',
-        answer
-    );
-
-    return answer;
 }
 
 // ==================================================
 // COMPTEUR
 // ==================================================
 
-const COUNTER_FILE =
-    path.join(
-        __dirname,
-        'counter.json'
-    );
+const COUNTER_FILE = path.join(
+    __dirname,
+    'counter.json'
+);
 
 let count = 1;
 let counting = false;
 let countInterval = null;
 
-if (
-    fs.existsSync(
-        COUNTER_FILE
-    )
-) {
+if (fs.existsSync(COUNTER_FILE)) {
     try {
-        const saved =
-            JSON.parse(
-                fs.readFileSync(
-                    COUNTER_FILE,
-                    'utf8'
-                )
-            );
+        const saved = JSON.parse(
+            fs.readFileSync(
+                COUNTER_FILE,
+                'utf8'
+            )
+        );
 
         if (
-            Number.isInteger(
-                saved.count
-            ) &&
+            Number.isInteger(saved.count) &&
             saved.count >= 1
         ) {
-            count =
-                saved.count;
+            count = saved.count;
         }
     } catch {
-        console.warn(
+        console.log(
             '⚠️ counter.json illisible.'
         );
     }
@@ -670,10 +321,7 @@ function stopCounter() {
     counting = false;
 
     if (countInterval) {
-        clearInterval(
-            countInterval
-        );
-
+        clearInterval(countInterval);
         countInterval = null;
     }
 
@@ -708,32 +356,31 @@ async function startCounter() {
     count++;
     saveCounter();
 
-    countInterval =
-        setInterval(
-            async () => {
-                if (!counting) {
-                    return;
-                }
+    countInterval = setInterval(
+        async () => {
+            if (!counting) {
+                return;
+            }
 
-                try {
-                    await channel.send(
-                        String(count)
-                    );
+            try {
+                await channel.send(
+                    String(count)
+                );
 
-                    count++;
-                    saveCounter();
+                count++;
+                saveCounter();
 
-                } catch (error) {
-                    console.error(
-                        '❌ Erreur compteur :',
-                        error
-                    );
+            } catch (error) {
+                console.error(
+                    '❌ Erreur compteur :',
+                    error
+                );
 
-                    stopCounter();
-                }
-            },
-            2000
-        );
+                stopCounter();
+            }
+        },
+        2000
+    );
 
     return true;
 }
@@ -747,8 +394,7 @@ function connectToVoice(channel) {
         channelId: channel.id,
         guildId: channel.guild.id,
         adapterCreator:
-            channel.guild
-                .voiceAdapterCreator,
+            channel.guild.voiceAdapterCreator,
         selfMute: true,
         selfDeaf: true
     });
@@ -758,9 +404,7 @@ function connectToVoice(channel) {
 // STEAM
 // ==================================================
 
-async function searchSteamGame(
-    gameName
-) {
+async function searchSteamGame(gameName) {
     const url =
         'https://store.steampowered.com/api/storesearch/' +
         `?term=${encodeURIComponent(gameName)}` +
@@ -778,14 +422,196 @@ async function searchSteamGame(
     const data =
         await response.json();
 
-    return (
-        data.items?.slice(0, 5) ||
-        []
-    );
+    return data.items?.slice(
+        0,
+        5
+    ) ?? [];
 }
 
 // ==================================================
-// PANEL
+// IA
+// ==================================================
+
+async function askAI(
+    channelId,
+    question,
+    userName,
+    imageUrls = []
+) {
+    if (!gemini) {
+        throw new Error('GEMINI_API_KEY absente.');
+    }
+
+    const history =
+        getHistory(channelId);
+
+    const systemPrompt = `
+Tu es KTR.BOT, un assistant IA intégré à Discord.
+
+Tu réponds en français sauf si l'utilisateur demande une autre langue.
+
+Tu aides notamment pour :
+- programmation JavaScript / Node.js / Python
+- création et modification de bots Discord
+- dépannage d'erreurs
+- explications techniques
+- idées de projets
+- jeux vidéo
+- questions générales
+
+Tu peux analyser les images envoyées par l'utilisateur.
+Quand une image est fournie :
+- regarde attentivement son contenu
+- décris ce qui est réellement visible
+- lis le texte visible quand c'est possible
+- utilise l'image pour répondre à la question de l'utilisateur
+- ne prétends pas voir quelque chose qui n'est pas clairement visible
+
+Quand tu fournis du code :
+- donne du code complet quand c'est pertinent
+- explique exactement où le mettre
+- évite de supprimer des fonctionnalités existantes sans raison
+- signale les erreurs probables
+- privilégie les solutions simples et fonctionnelles
+
+Sois utile, direct et clair.
+Tu peux utiliser des emojis avec modération.
+
+Nom Discord de l'utilisateur : ${userName}
+`;
+
+    const contents = history.map(item => ({
+        role: item.role === 'assistant' ? 'model' : 'user',
+        parts: [
+            {
+                text: typeof item.content === 'string'
+                    ? item.content
+                    : '[Image envoyée précédemment]'
+            }
+        ]
+    }));
+
+    const currentParts = [];
+
+    if (question?.trim()) {
+        currentParts.push({
+            text: question.trim()
+        });
+    } else if (imageUrls.length) {
+        currentParts.push({
+            text: 'Analyse cette image.'
+        });
+    }
+
+    // Gemini accepte les images inline en base64.
+    // On limite à 5 images et à 4 Mo par image pour éviter
+    // les requêtes Discord/Gemini trop volumineuses.
+    for (const imageUrl of imageUrls.slice(0, 5)) {
+        try {
+            const imageResponse =
+                await fetch(imageUrl);
+
+            if (!imageResponse.ok) {
+                console.warn(
+                    `⚠️ Image inaccessible (${imageResponse.status}) : ${imageUrl}`
+                );
+                continue;
+            }
+
+            const contentLength =
+                Number(
+                    imageResponse.headers.get('content-length') ||
+                    0
+                );
+
+            if (contentLength > 4 * 1024 * 1024) {
+                console.warn(
+                    '⚠️ Image ignorée : plus de 4 Mo.'
+                );
+                continue;
+            }
+
+            const arrayBuffer =
+                await imageResponse.arrayBuffer();
+
+            if (arrayBuffer.byteLength > 4 * 1024 * 1024) {
+                console.warn(
+                    '⚠️ Image ignorée : plus de 4 Mo.'
+                );
+                continue;
+            }
+
+            const mimeType =
+                (
+                    imageResponse.headers.get('content-type') ||
+                    'image/jpeg'
+                ).split(';')[0];
+
+            if (!mimeType.startsWith('image/')) {
+                console.warn(
+                    `⚠️ Fichier ignoré : ${mimeType}`
+                );
+                continue;
+            }
+
+            currentParts.push({
+                inlineData: {
+                    mimeType,
+                    data: Buffer.from(arrayBuffer).toString('base64')
+                }
+            });
+        } catch (error) {
+            console.error(
+                '❌ Impossible de récupérer une image :',
+                error
+            );
+        }
+    }
+
+    contents.push({
+        role: 'user',
+        parts: currentParts.length
+            ? currentParts
+            : [{ text: question || 'Bonjour.' }]
+    });
+
+    const response =
+        await gemini.models.generateContent({
+            model: GEMINI_MODEL,
+            contents,
+            config: {
+                systemInstruction: systemPrompt
+            }
+        });
+
+    const answer =
+        response.text?.trim();
+
+    if (!answer) {
+        throw new Error(
+            'Réponse Gemini vide.'
+        );
+    }
+
+    addHistory(
+        channelId,
+        'user',
+        imageUrls.length > 0
+            ? `${question || 'Analyse cette image.'}\n[Image envoyée]`
+            : question
+    );
+
+    addHistory(
+        channelId,
+        'assistant',
+        answer
+    );
+
+    return answer;
+}
+
+// ==================================================
+// PANNEAU
 // ==================================================
 
 function createPanel() {
@@ -796,7 +622,7 @@ function createPanel() {
             )
             .setDescription(
                 'Bienvenue 👋\n\n' +
-                'Choisis une ressource :\n\n' +
+                'Choisis une ressource dans le menu ci-dessous.\n\n' +
                 '🎵 Spotify / Spicetify\n' +
                 '🧩 Plugins Steam\n' +
                 '⚡ Project Lightning\n' +
@@ -814,7 +640,7 @@ function createPanel() {
                 'resource_menu'
             )
             .setPlaceholder(
-                'Sélectionne une option...'
+                'Sélectionnez une option...'
             )
             .addOptions(
                 {
@@ -824,7 +650,8 @@ function createPanel() {
                         'Ouvrir Spicetify',
                     value:
                         'spotify',
-                    emoji: '🎵'
+                    emoji:
+                        '🎵'
                 },
                 {
                     label:
@@ -833,7 +660,8 @@ function createPanel() {
                         'Ouvrir SteamBrew',
                     value:
                         'plugins',
-                    emoji: '🧩'
+                    emoji:
+                        '🧩'
                 },
                 {
                     label:
@@ -842,15 +670,18 @@ function createPanel() {
                         'Ouvrir Project Lightning',
                     value:
                         'lightning',
-                    emoji: '⚡'
+                    emoji:
+                        '⚡'
                 },
                 {
-                    label: 'Steam',
+                    label:
+                        'Steam',
                     description:
                         'Ouvrir Steam',
                     value:
                         'steam',
-                    emoji: '🎮'
+                    emoji:
+                        '🎮'
                 }
             );
 
@@ -869,9 +700,7 @@ function createPanel() {
 
 function formatUptime(ms) {
     let seconds =
-        Math.floor(
-            ms / 1000
-        );
+        Math.floor(ms / 1000);
 
     const days =
         Math.floor(
@@ -916,13 +745,13 @@ const commands = [
     new SlashCommandBuilder()
         .setName('ping')
         .setDescription(
-            'Affiche le ping'
+            'Affiche le ping du bot'
         ),
 
     new SlashCommandBuilder()
         .setName('uptime')
         .setDescription(
-            'Affiche le temps de fonctionnement'
+            'Affiche depuis combien de temps le bot tourne'
         ),
 
     new SlashCommandBuilder()
@@ -931,8 +760,9 @@ const commands = [
             'Affiche un avatar'
         )
         .addUserOption(
-            o =>
-                o.setName('membre')
+            option =>
+                option
+                    .setName('membre')
                     .setDescription(
                         'Membre'
                     )
@@ -942,11 +772,12 @@ const commands = [
     new SlashCommandBuilder()
         .setName('userinfo')
         .setDescription(
-            'Informations sur un membre'
+            'Affiche les informations d’un membre'
         )
         .addUserOption(
-            o =>
-                o.setName('membre')
+            option =>
+                option
+                    .setName('membre')
                     .setDescription(
                         'Membre'
                     )
@@ -956,23 +787,24 @@ const commands = [
     new SlashCommandBuilder()
         .setName('serverinfo')
         .setDescription(
-            'Informations du serveur'
+            'Affiche les informations du serveur'
         ),
 
     new SlashCommandBuilder()
         .setName('botinfo')
         .setDescription(
-            'Informations du bot'
+            'Affiche les informations du bot'
         ),
 
     new SlashCommandBuilder()
         .setName('channelinfo')
         .setDescription(
-            'Informations d’un salon'
+            'Affiche les informations d’un salon'
         )
         .addChannelOption(
-            o =>
-                o.setName('salon')
+            option =>
+                option
+                    .setName('salon')
                     .setDescription(
                         'Salon'
                     )
@@ -982,7 +814,7 @@ const commands = [
     new SlashCommandBuilder()
         .setName('grosfdp')
         .setDescription(
-            'Rejoint ton vocal'
+            'Rejoint le vocal où tu es'
         ),
 
     new SlashCommandBuilder()
@@ -1018,11 +850,12 @@ const commands = [
     new SlashCommandBuilder()
         .setName('steamid')
         .setDescription(
-            'Cherche le Steam App ID'
+            'Cherche le Steam App ID d’un jeu'
         )
         .addStringOption(
-            o =>
-                o.setName('jeu')
+            option =>
+                option
+                    .setName('jeu')
                     .setDescription(
                         'Nom du jeu'
                     )
@@ -1032,47 +865,64 @@ const commands = [
     new SlashCommandBuilder()
         .setName('onlinefix')
         .setDescription(
-            'Project Lightning'
+            'Affiche le lien Project Lightning'
         ),
 
     new SlashCommandBuilder()
         .setName('spotifyfree')
         .setDescription(
-            'Spicetify'
+            'Affiche le lien Spicetify'
         ),
 
     new SlashCommandBuilder()
         .setName('pluginsteam')
         .setDescription(
-            'SteamBrew'
+            'Affiche le lien SteamBrew'
         ),
 
     new SlashCommandBuilder()
         .setName('panel')
         .setDescription(
-            'Envoie le panneau'
+            'Envoie le panneau des ressources'
         ),
 
     new SlashCommandBuilder()
         .setName('ia')
         .setDescription(
-            'Pose une question à Gemini'
+            'Pose une question à l’IA'
         )
         .addStringOption(
-            o =>
-                o.setName('question')
+            option =>
+                option
+                    .setName('question')
                     .setDescription(
                         'Ta question'
                     )
                     .setRequired(true)
         )
         .addAttachmentOption(
-            o =>
-                o.setName('image')
+            option =>
+                option
+                    .setName('image')
                     .setDescription(
-                        'Image à analyser'
+                        'Image à analyser (optionnel)'
                     )
                     .setRequired(false)
+        ),
+
+    new SlashCommandBuilder()
+        .setName('message')
+        .setDescription(
+            'Fait envoyer un message par le bot'
+        )
+        .addStringOption(
+            option =>
+                option
+                    .setName('texte')
+                    .setDescription(
+                        'Message à envoyer'
+                    )
+                    .setRequired(true)
         ),
 
     new SlashCommandBuilder()
@@ -1084,10 +934,11 @@ const commands = [
             PermissionFlagsBits.ManageMessages
         )
         .addStringOption(
-            o =>
-                o.setName('texte')
+            option =>
+                option
+                    .setName('texte')
                     .setDescription(
-                        'Texte'
+                        'Texte à envoyer'
                     )
                     .setRequired(true)
         ),
@@ -1101,16 +952,18 @@ const commands = [
             PermissionFlagsBits.KickMembers
         )
         .addUserOption(
-            o =>
-                o.setName('membre')
+            option =>
+                option
+                    .setName('membre')
                     .setDescription(
                         'Membre'
                     )
                     .setRequired(true)
         )
         .addStringOption(
-            o =>
-                o.setName('raison')
+            option =>
+                option
+                    .setName('raison')
                     .setDescription(
                         'Raison'
                     )
@@ -1126,16 +979,18 @@ const commands = [
             PermissionFlagsBits.BanMembers
         )
         .addUserOption(
-            o =>
-                o.setName('membre')
+            option =>
+                option
+                    .setName('membre')
                     .setDescription(
                         'Membre'
                     )
                     .setRequired(true)
         )
         .addStringOption(
-            o =>
-                o.setName('raison')
+            option =>
+                option
+                    .setName('raison')
                     .setDescription(
                         'Raison'
                     )
@@ -1145,32 +1000,37 @@ const commands = [
     new SlashCommandBuilder()
         .setName('timeout')
         .setDescription(
-            'Timeout un membre'
+            'Exclut temporairement un membre'
         )
         .setDefaultMemberPermissions(
             PermissionFlagsBits.ModerateMembers
         )
         .addUserOption(
-            o =>
-                o.setName('membre')
+            option =>
+                option
+                    .setName('membre')
                     .setDescription(
                         'Membre'
                     )
                     .setRequired(true)
         )
         .addIntegerOption(
-            o =>
-                o.setName('secondes')
+            option =>
+                option
+                    .setName('secondes')
                     .setDescription(
                         'Durée'
                     )
                     .setRequired(true)
                     .setMinValue(1)
-                    .setMaxValue(2419200)
+                    .setMaxValue(
+                        2419200
+                    )
         )
         .addStringOption(
-            o =>
-                o.setName('raison')
+            option =>
+                option
+                    .setName('raison')
                     .setDescription(
                         'Raison'
                     )
@@ -1180,14 +1040,15 @@ const commands = [
     new SlashCommandBuilder()
         .setName('untimeout')
         .setDescription(
-            'Retire le timeout'
+            'Retire l’exclusion temporaire'
         )
         .setDefaultMemberPermissions(
             PermissionFlagsBits.ModerateMembers
         )
         .addUserOption(
-            o =>
-                o.setName('membre')
+            option =>
+                option
+                    .setName('membre')
                     .setDescription(
                         'Membre'
                     )
@@ -1197,11 +1058,12 @@ const commands = [
     new SlashCommandBuilder()
         .setName('8ball')
         .setDescription(
-            'Pose une question'
+            'Répond à une question'
         )
         .addStringOption(
-            o =>
-                o.setName('question')
+            option =>
+                option
+                    .setName('question')
                     .setDescription(
                         'Question'
                     )
@@ -1220,14 +1082,17 @@ const commands = [
             'Lance un dé'
         )
         .addIntegerOption(
-            o =>
-                o.setName('max')
+            option =>
+                option
+                    .setName('max')
                     .setDescription(
                         'Maximum'
                     )
                     .setRequired(false)
                     .setMinValue(2)
-                    .setMaxValue(1000000)
+                    .setMaxValue(
+                        1000000
+                    )
         ),
 
     new SlashCommandBuilder()
@@ -1236,16 +1101,18 @@ const commands = [
             'Nombre aléatoire'
         )
         .addIntegerOption(
-            o =>
-                o.setName('min')
+            option =>
+                option
+                    .setName('min')
                     .setDescription(
                         'Minimum'
                     )
                     .setRequired(true)
         )
         .addIntegerOption(
-            o =>
-                o.setName('max')
+            option =>
+                option
+                    .setName('max')
                     .setDescription(
                         'Maximum'
                     )
@@ -1253,25 +1120,34 @@ const commands = [
         ),
 
     ...[
-        10, 20, 30, 40, 50,
-        60, 70, 80, 90, 100
+        10,
+        20,
+        30,
+        40,
+        50,
+        60,
+        70,
+        80,
+        90,
+        100
     ].map(
-        n =>
+        number =>
             new SlashCommandBuilder()
-                .setName(`clear${n}`)
+                .setName(
+                    `clear${number}`
+                )
                 .setDescription(
-                    `Supprime ${n} messages`
+                    `Supprime ${number} messages`
                 )
                 .setDefaultMemberPermissions(
                     PermissionFlagsBits.ManageMessages
                 )
+                .toJSON()
     )
-].map(command =>
-    command.toJSON()
-);
+];
 
 // ==================================================
-// ENREGISTREMENT COMMANDES
+// COMMANDES JSON
 // ==================================================
 
 async function registerCommands() {
@@ -1293,7 +1169,7 @@ async function registerCommands() {
     );
 
     console.log(
-        '✅ Commandes Discord installées.'
+        '✅ Toutes les commandes sont installées.'
     );
 }
 
@@ -1319,6 +1195,14 @@ client.once(
             status: 'dnd'
         });
 
+        console.log(
+            '🔴 Statut : Ne pas déranger'
+        );
+
+        console.log(
+            '💩 Activité : En train de chier'
+        );
+
         await registerCommands();
 
         const guild =
@@ -1327,16 +1211,14 @@ client.once(
             );
 
         if (!guild) {
-            console.error(
+            console.log(
                 '❌ Serveur introuvable.'
             );
             return;
         }
 
         const aiChannel =
-            await findOrCreateAIChannel(
-                guild
-            );
+            await findOrCreateAIChannel(guild);
 
         console.log(
             `🤖 Salon IA actif : #${aiChannel.name} (${aiChannel.id})`
@@ -1351,23 +1233,16 @@ client.once(
             voiceChannel &&
             voiceChannel.isVoiceBased()
         ) {
-            try {
-                connectToVoice(
-                    voiceChannel
-                );
+            connectToVoice(
+                voiceChannel
+            );
 
-                console.log(
-                    `🔊 Connecté à ${voiceChannel.name}`
-                );
-            } catch (error) {
-                console.error(
-                    '❌ Erreur vocal :',
-                    error
-                );
-            }
+            console.log(
+                `🔊 Connecté à ${voiceChannel.name}`
+            );
         } else {
-            console.warn(
-                '⚠️ Vocal introuvable.'
+            console.log(
+                '❌ Vocal introuvable.'
             );
         }
 
@@ -1375,129 +1250,14 @@ client.once(
             `🔢 Compteur sauvegardé : ${count}`
         );
 
-        if (gemini) {
+        if (!process.env.GEMINI_API_KEY) {
             console.log(
-                `🤖 IA Gemini activée avec ${GEMINI_MODEL}.`
+                '⚠️ GEMINI_API_KEY absent : /ia ne fonctionnera pas.'
             );
         } else {
-            console.warn(
-                '⚠️ GEMINI_API_KEY absente.'
+            console.log(
+                '🤖 IA Gemini activée.'
             );
-        }
-    }
-);
-
-// ==================================================
-// MESSAGES NORMAUX DANS LES CONVERSATIONS IA
-// ==================================================
-
-client.on(
-    'messageCreate',
-    async message => {
-        if (
-            message.author.bot ||
-            !message.guild ||
-            message.content.startsWith('/')
-        ) {
-            return;
-        }
-
-        const channelId =
-            message.channelId;
-
-        const history =
-            aiHistory.get(channelId);
-
-        if (
-            !history ||
-            history.length === 0
-        ) {
-            return;
-        }
-
-        if (!gemini) {
-            return;
-        }
-
-        try {
-            await message.channel.sendTyping();
-
-            const imageUrls =
-                [
-                    ...message.attachments.values()
-                ]
-                    .filter(
-                        attachment => {
-                            const type =
-                                attachment.contentType ||
-                                '';
-
-                            return (
-                                type.startsWith(
-                                    'image/'
-                                ) ||
-                                /\.(png|jpe?g|gif|webp|bmp|avif)(\?|$)/i.test(
-                                    attachment.url
-                                )
-                            );
-                        }
-                    )
-                    .map(
-                        attachment =>
-                            attachment.url
-                    )
-                    .slice(0, 5);
-
-            const answer =
-                await askAI(
-                    channelId,
-                    message.content ||
-                        'Analyse cette image.',
-                    message.author.username,
-                    imageUrls
-                );
-
-            resetAIInactivityTimer(
-                channelId
-            );
-
-            if (
-                answer.length <= 2000
-            ) {
-                await message.reply(
-                    answer
-                );
-            } else {
-                const parts =
-                    answer.match(
-                        /.{1,1900}/gs
-                    ) || [];
-
-                if (parts[0]) {
-                    await message.reply(
-                        parts[0]
-                    );
-                }
-
-                for (
-                    const part of
-                    parts.slice(1)
-                ) {
-                    await message.channel.send(
-                        part
-                    );
-                }
-            }
-
-        } catch (error) {
-            console.error(
-                '❌ Erreur IA message :',
-                error
-            );
-
-            await message.reply(
-                '❌ Une erreur est survenue avec l’IA.'
-            ).catch(() => {});
         }
     }
 );
@@ -1506,13 +1266,96 @@ client.on(
 // INTERACTIONS
 // ==================================================
 
+// ==================================================
+// CONVERSATION IA SANS /ia À CHAQUE MESSAGE
+// ==================================================
+// /ia peut être utilisé dans N'IMPORTE QUEL salon texte.
+// Une fois /ia lancé dans un salon, les messages normaux de ce salon
+// continuent la même conversation pendant 2 minutes d'inactivité maximum.
+client.on(
+    'messageCreate',
+    async message => {
+
+        if (
+            message.author.bot ||
+            !message.guild ||
+            !message.content ||
+            message.content.startsWith('/')
+        ) {
+            return;
+        }
+
+        const channelId = message.channelId;
+        const history = aiHistory.get(channelId);
+
+        // Il faut d'abord lancer /ia dans ce salon.
+        if (!history || history.length === 0) {
+            return;
+        }
+
+        if (!process.env.GEMINI_API_KEY) {
+            return;
+        }
+
+        try {
+            await message.channel.sendTyping();
+
+            const imageUrls =
+                message.attachments
+                    .filter(attachment => {
+                        const type =
+                            attachment.contentType || '';
+
+                        return (
+                            type.startsWith('image/') ||
+                            /\.(png|jpe?g|gif|webp|bmp|avif)(\?|$)/i.test(
+                                attachment.url
+                            )
+                        );
+                    })
+                    .map(attachment => attachment.url)
+                    .slice(0, 5);
+
+            // Un message avec une image compte aussi comme activité IA.
+            const answer = await askAI(
+                channelId,
+                message.content || 'Analyse cette image.',
+                message.author.username,
+                imageUrls
+            );
+
+            resetAIInactivityTimer(channelId);
+
+            if (answer.length <= 2000) {
+                await message.reply(answer);
+            } else {
+                const parts = answer.match(/.{1,1900}/gs) || [];
+
+                if (parts[0]) {
+                    await message.reply(parts[0]);
+                }
+
+                for (const part of parts.slice(1)) {
+                    await message.channel.send(part);
+                }
+            }
+        } catch (error) {
+            console.error('❌ Erreur IA message normal :', error);
+            await message.reply(
+                '❌ Une erreur est survenue avec l’IA.'
+            ).catch(() => {});
+        }
+    }
+);
+
 client.on(
     'interactionCreate',
     async interaction => {
+
         try {
 
             // ==========================================
-            // MENU RESSOURCES
+            // MENU
             // ==========================================
 
             if (
@@ -1520,28 +1363,30 @@ client.on(
                 interaction.customId ===
                     'resource_menu'
             ) {
+
+                const selected =
+                    interaction.values[0];
+
                 const links = {
                     spotify:
                         '🎵 **Spicetify**\nhttps://spicetify.app',
+
                     plugins:
                         '🧩 **SteamBrew**\nhttps://steambrew.app',
+
                     lightning:
                         '⚡ **Project Lightning**\nhttps://project-lightning-web.vercel.app',
+
                     steam:
                         '🎮 **Steam**\nhttps://store.steampowered.com'
                 };
 
-                await safeReply(
-                    interaction,
-                    {
-                        content:
-                            links[
-                                interaction.values[0]
-                            ],
-                        flags:
-                            MessageFlags.Ephemeral
-                    }
-                );
+                await interaction.reply({
+                    content:
+                        links[selected],
+                    flags:
+                        MessageFlags.Ephemeral
+                });
 
                 return;
             }
@@ -1552,25 +1397,22 @@ client.on(
                 return;
             }
 
-            const command =
-                interaction.commandName;
-
             // ==========================================
-            // /ia
+            // /IA
             // ==========================================
 
-            if (command === 'ia') {
+            if (
+                interaction.commandName ===
+                'ia'
+            ) {
 
-                if (!gemini) {
-                    await safeReply(
-                        interaction,
-                        {
-                            content:
-                                '❌ GEMINI_API_KEY n’est pas configurée.',
-                            flags:
-                                MessageFlags.Ephemeral
-                        }
-                    );
+                if (!process.env.GEMINI_API_KEY) {
+                    await interaction.reply({
+                        content:
+                            '❌ La clé Gemini n’est pas configurée dans `.env`.',
+                        flags:
+                            MessageFlags.Ephemeral
+                    });
 
                     return;
                 }
@@ -1585,75 +1427,48 @@ client.on(
                         'image'
                     );
 
-                const imageUrls =
-                    image
-                        ? [image.url]
-                        : [];
+                const imageUrls = image
+                    ? [image.url]
+                    : [];
 
-                // IMPORTANT :
-                // on répond à Discord immédiatement.
-                const deferred =
-                    await safeDefer(
-                        interaction
+                await interaction.deferReply();
+
+                const channelId = interaction.channelId;
+
+                const answer =
+                    await askAI(
+                        channelId,
+                        question,
+                        interaction.user.username,
+                        imageUrls
                     );
 
-                if (!deferred) {
-                    return;
-                }
+                // Chaque question repousse le délai de 2 minutes pour CE salon.
+                resetAIInactivityTimer(channelId);
 
-                try {
-                    const answer =
-                        await askAI(
-                            interaction.channelId,
-                            question,
-                            interaction.user.username,
-                            imageUrls
-                        );
+                // Discord limite les messages à 2000 caractères
+                if (answer.length <= 2000) {
+                    await interaction.editReply(
+                        answer
+                    );
+                } else {
+                    const parts =
+                        answer.match(
+                            /.{1,1900}/gs
+                        ) || [];
 
-                    resetAIInactivityTimer(
-                        interaction.channelId
+                    await interaction.editReply(
+                        parts[0]
                     );
 
-                    if (
-                        answer.length <= 2000
+                    for (
+                        const part of
+                        parts.slice(1)
                     ) {
-                        await safeEditReply(
-                            interaction,
-                            answer
+                        await interaction.channel.send(
+                            part
                         );
-                    } else {
-                        const parts =
-                            answer.match(
-                                /.{1,1900}/gs
-                            ) || [];
-
-                        if (parts[0]) {
-                            await safeEditReply(
-                                interaction,
-                                parts[0]
-                            );
-                        }
-
-                        for (
-                            const part of
-                            parts.slice(1)
-                        ) {
-                            await interaction.channel.send(
-                                part
-                            );
-                        }
                     }
-
-                } catch (error) {
-                    console.error(
-                        '❌ ERREUR /IA :',
-                        error
-                    );
-
-                    await safeEditReply(
-                        interaction,
-                        '❌ Gemini a rencontré une erreur. Regarde les logs Railway.'
-                    );
                 }
 
                 return;
@@ -1663,44 +1478,47 @@ client.on(
             // /help
             // ==========================================
 
-            if (command === 'help') {
-                await safeReply(
-                    interaction,
-                    {
-                        embeds: [
-                            new EmbedBuilder()
-                                .setTitle(
-                                    '📚 KTR.BOT — COMMANDES'
-                                )
-                                .setDescription(
-                                    '**🤖 IA**\n' +
-                                    '`/ia question:`\n' +
-                                    'Conversation continue + images.\n' +
-                                    'Le salon IA est renouvelé après 2 minutes.\n\n' +
+            if (
+                interaction.commandName ===
+                'help'
+            ) {
 
-                                    '**🔊 Vocal**\n' +
-                                    '`/grosfdp` `/rejoin` `/fdp`\n\n' +
+                const embed =
+                    new EmbedBuilder()
+                        .setTitle(
+                            '📚 KTR.BOT — COMMANDES'
+                        )
+                        .setDescription(
+                            '**🤖 IA**\n' +
+                            '`/ia question:`\n' +
+                            'Le salon est renouvelé après 2 minutes sans nouveau message.\n\n' +
 
-                                    '**🛠️ Modération**\n' +
-                                    '`/clear10` → `/clear100`\n' +
-                                    '`/kick` `/ban` `/timeout` `/untimeout` `/say`\n\n' +
+                            '**🔊 Vocal**\n' +
+                            '`/grosfdp` `/rejoin` `/fdp`\n\n' +
 
-                                    '**📊 Infos**\n' +
-                                    '`/ping` `/uptime` `/avatar` `/userinfo`\n' +
-                                    '`/serverinfo` `/botinfo` `/channelinfo`\n\n' +
+                            '**🛠️ Modération**\n' +
+                            '`/clear10` → `/clear100` `' +
+                            '`/kick` `/ban` `/timeout` `/untimeout` `/say`\n\n' +
 
-                                    '**🎮 Steam / Ressources**\n' +
-                                    '`/steamid` `/onlinefix` `/spotifyfree` `/pluginsteam` `/panel`\n\n' +
+                            '**📊 Infos**\n' +
+                            '`/ping` `/uptime` `/avatar` `' +
+                            '`/userinfo` `/serverinfo` `/botinfo` `/channelinfo`\n\n' +
 
-                                    '**🔢 Outils**\n' +
-                                    '`/compteur` `/stopcompteur` `/8ball` `/coinflip` `/roll` `/random`'
-                                )
-                                .setColor(
-                                    0x5865F2
-                                )
-                        ]
-                    }
-                );
+                            '**🎮 Steam / Ressources**\n' +
+                            '`/steamid` `/onlinefix` `/spotifyfree` `/pluginsteam` `/panel`\n\n' +
+
+                            '**🔢 Outils**\n' +
+                            '`/compteur` `/stopcompteur` `/8ball` `/coinflip` `/roll` `/random`'
+                        )
+                        .setColor(
+                            0x5865F2
+                        );
+
+                await interaction.reply({
+                    embeds: [
+                        embed
+                    ]
+                });
 
                 return;
             }
@@ -1709,11 +1527,15 @@ client.on(
             // /ping
             // ==========================================
 
-            if (command === 'ping') {
-                await safeReply(
-                    interaction,
+            if (
+                interaction.commandName ===
+                'ping'
+            ) {
+
+                await interaction.reply(
                     `🏓 Pong ! **${client.ws.ping} ms**`
                 );
+
                 return;
             }
 
@@ -1721,11 +1543,17 @@ client.on(
             // /uptime
             // ==========================================
 
-            if (command === 'uptime') {
-                await safeReply(
-                    interaction,
-                    `⏱️ Le bot tourne depuis **${formatUptime(client.uptime || 0)}**.`
+            if (
+                interaction.commandName ===
+                'uptime'
+            ) {
+
+                await interaction.reply(
+                    `⏱️ Le bot tourne depuis **${formatUptime(
+                        client.uptime || 0
+                    )}**.`
                 );
+
                 return;
             }
 
@@ -1733,33 +1561,38 @@ client.on(
             // /avatar
             // ==========================================
 
-            if (command === 'avatar') {
+            if (
+                interaction.commandName ===
+                'avatar'
+            ) {
+
                 const user =
                     interaction.options.getUser(
                         'membre'
                     ) ||
                     interaction.user;
 
-                await safeReply(
-                    interaction,
-                    {
-                        embeds: [
-                            new EmbedBuilder()
-                                .setTitle(
-                                    `🖼️ Avatar de ${user.username}`
-                                )
-                                .setImage(
-                                    user.displayAvatarURL({
-                                        size: 1024,
-                                        extension: 'png'
-                                    })
-                                )
-                                .setColor(
-                                    0x5865F2
-                                )
-                        ]
-                    }
-                );
+                const embed =
+                    new EmbedBuilder()
+                        .setTitle(
+                            `🖼️ Avatar de ${user.username}`
+                        )
+                        .setImage(
+                            user.displayAvatarURL({
+                                size: 1024,
+                                extension:
+                                    'png'
+                            })
+                        )
+                        .setColor(
+                            0x5865F2
+                        );
+
+                await interaction.reply({
+                    embeds: [
+                        embed
+                    ]
+                });
 
                 return;
             }
@@ -1768,15 +1601,22 @@ client.on(
             // /userinfo
             // ==========================================
 
-            if (command === 'userinfo') {
+            if (
+                interaction.commandName ===
+                'userinfo'
+            ) {
+
                 const user =
                     interaction.options.getUser(
                         'membre'
                     );
 
                 const member =
-                    await interaction.guild.members
-                        .fetch(user.id)
+                    await interaction.guild
+                        .members
+                        .fetch(
+                            user.id
+                        )
                         .catch(
                             () => null
                         );
@@ -1794,23 +1634,27 @@ client.on(
                             `\`${user.id}\``
                     },
                     {
-                        name: '👤 Pseudo',
+                        name:
+                            '👤 Pseudo',
                         value:
                             `\`${user.username}\``
                     },
                     {
-                        name: '📛 Nom',
+                        name:
+                            '📛 Nom',
                         value:
                             user.globalName ||
                             'Aucun'
                     },
                     {
-                        name: '📅 Création',
+                        name:
+                            '📅 Création',
                         value:
                             `<t:${created}:F>\n<t:${created}:R>`
                     },
                     {
-                        name: '🤖 Type',
+                        name:
+                            '🤖 Type',
                         value:
                             user.bot
                                 ? 'Bot'
@@ -1818,39 +1662,40 @@ client.on(
                     }
                 ];
 
-                if (
-                    member?.joinedTimestamp
-                ) {
+                if (member) {
+
                     fields.push({
                         name:
                             '📥 Arrivée',
                         value:
-                            `<t:${Math.floor(member.joinedTimestamp / 1000)}:F>`
+                            member.joinedTimestamp
+                                ? `<t:${Math.floor(
+                                    member.joinedTimestamp /
+                                    1000
+                                )}:F>`
+                                : 'Inconnue'
                     });
                 }
 
-                await safeReply(
-                    interaction,
-                    {
-                        embeds: [
-                            new EmbedBuilder()
-                                .setTitle(
-                                    '🔎 Informations du membre'
-                                )
-                                .setThumbnail(
-                                    user.displayAvatarURL({
-                                        size: 256
-                                    })
-                                )
-                                .addFields(
-                                    fields
-                                )
-                                .setColor(
-                                    0x5865F2
-                                )
-                        ]
-                    }
-                );
+                await interaction.reply({
+                    embeds: [
+                        new EmbedBuilder()
+                            .setTitle(
+                                '🔎 Informations du membre'
+                            )
+                            .setThumbnail(
+                                user.displayAvatarURL({
+                                    size: 256
+                                })
+                            )
+                            .addFields(
+                                fields
+                            )
+                            .setColor(
+                                0x5865F2
+                            )
+                    ]
+                });
 
                 return;
             }
@@ -1859,62 +1704,80 @@ client.on(
             // /serverinfo
             // ==========================================
 
-            if (command === 'serverinfo') {
+            if (
+                interaction.commandName ===
+                'serverinfo'
+            ) {
+
                 const guild =
                     interaction.guild;
 
-                await safeReply(
-                    interaction,
-                    {
-                        embeds: [
-                            new EmbedBuilder()
-                                .setTitle(
-                                    `🏠 ${guild.name}`
-                                )
-                                .addFields(
-                                    {
-                                        name: '🆔 ID',
-                                        value:
-                                            `\`${guild.id}\``
-                                    },
-                                    {
-                                        name:
-                                            '👥 Membres',
-                                        value:
-                                            String(
-                                                guild.memberCount
-                                            )
-                                    },
-                                    {
-                                        name:
-                                            '💬 Salons',
-                                        value:
-                                            String(
-                                                guild.channels.cache.size
-                                            )
-                                    },
-                                    {
-                                        name:
-                                            '🚀 Boosts',
-                                        value:
-                                            String(
-                                                guild.premiumSubscriptionCount ||
-                                                0
-                                            )
-                                    },
-                                    {
-                                        name:
-                                            '📅 Création',
-                                        value:
-                                            `<t:${Math.floor(guild.createdTimestamp / 1000)}:F>`
-                                    }
-                                )
-                                .setColor(
-                                    0x5865F2
-                                )
-                        ]
-                    }
-                );
+                const embed =
+                    new EmbedBuilder()
+                        .setTitle(
+                            `🏠 ${guild.name}`
+                        )
+                        .addFields(
+                            {
+                                name: '🆔 ID',
+                                value:
+                                    `\`${guild.id}\``
+                            },
+                            {
+                                name:
+                                    '👥 Membres',
+                                value:
+                                    String(
+                                        guild.memberCount
+                                    )
+                            },
+                            {
+                                name:
+                                    '💬 Salons',
+                                value:
+                                    String(
+                                        guild.channels.cache.size
+                                    )
+                            },
+                            {
+                                name:
+                                    '🚀 Boosts',
+                                value:
+                                    String(
+                                        guild.premiumSubscriptionCount ||
+                                        0
+                                    )
+                            },
+                            {
+                                name:
+                                    '📅 Création',
+                                value:
+                                    `<t:${Math.floor(
+                                        guild.createdTimestamp /
+                                        1000
+                                    )}:F>`
+                            }
+                        )
+                        .setColor(
+                            0x5865F2
+                        );
+
+                const icon =
+                    guild.iconURL({
+                        size: 256
+                    });
+
+                if (icon) {
+                    embed.setThumbnail(
+                        icon
+                    );
+                }
+
+                await interaction.reply({
+                    embeds: [
+                        embed
+                    ]
+                });
 
                 return;
             }
@@ -1923,60 +1786,61 @@ client.on(
             // /botinfo
             // ==========================================
 
-            if (command === 'botinfo') {
-                await safeReply(
-                    interaction,
-                    {
-                        embeds: [
-                            new EmbedBuilder()
-                                .setTitle(
-                                    '🤖 KTR.BOT'
-                                )
-                                .addFields(
-                                    {
-                                        name:
-                                            '🏓 Ping',
-                                        value:
-                                            `${client.ws.ping} ms`
-                                    },
-                                    {
-                                        name:
-                                            '⏱️ Uptime',
-                                        value:
-                                            formatUptime(
-                                                client.uptime ||
-                                                0
-                                            )
-                                    },
-                                    {
-                                        name:
-                                            '🏠 Serveurs',
-                                        value:
-                                            String(
-                                                client.guilds.cache.size
-                                            )
-                                    },
-                                    {
-                                        name:
-                                            '📦 discord.js',
-                                        value:
-                                            discordJsVersion
-                                    },
-                                    {
-                                        name:
-                                            '🤖 IA',
-                                        value:
-                                            gemini
-                                                ? 'Gemini activée'
-                                                : 'Non configurée'
-                                    }
-                                )
-                                .setColor(
-                                    0x5865F2
-                                )
-                        ]
-                    }
-                );
+            if (
+                interaction.commandName ===
+                'botinfo'
+            ) {
+
+                await interaction.reply({
+                    embeds: [
+                        new EmbedBuilder()
+                            .setTitle(
+                                '🤖 KTR.BOT'
+                            )
+                            .addFields(
+                                {
+                                    name:
+                                        '🏓 Ping',
+                                    value:
+                                        `${client.ws.ping} ms`
+                                },
+                                {
+                                    name:
+                                        '⏱️ Uptime',
+                                    value:
+                                        formatUptime(
+                                            client.uptime ||
+                                            0
+                                        )
+                                },
+                                {
+                                    name:
+                                        '🏠 Serveurs',
+                                    value:
+                                        String(
+                                            client.guilds.cache.size
+                                        )
+                                },
+                                {
+                                    name:
+                                        '📦 discord.js',
+                                    value:
+                                        discordJsVersion
+                                },
+                                {
+                                    name:
+                                        '🤖 IA',
+                                    value:
+                                        process.env.GEMINI_API_KEY
+                                            ? 'Activée'
+                                            : 'Non configurée'
+                                }
+                            )
+                            .setColor(
+                                0x5865F2
+                            )
+                    ]
+                });
 
                 return;
             }
@@ -1985,41 +1849,43 @@ client.on(
             // /channelinfo
             // ==========================================
 
-            if (command === 'channelinfo') {
+            if (
+                interaction.commandName ===
+                'channelinfo'
+            ) {
+
                 const channel =
                     interaction.options.getChannel(
                         'salon'
                     );
 
-                await safeReply(
-                    interaction,
-                    {
-                        embeds: [
-                            new EmbedBuilder()
-                                .setTitle(
-                                    `📺 ${channel.name}`
-                                )
-                                .addFields(
-                                    {
-                                        name: '🆔 ID',
-                                        value:
-                                            `\`${channel.id}\``
-                                    },
-                                    {
-                                        name:
-                                            '📁 Type',
-                                        value:
-                                            String(
-                                                channel.type
-                                            )
-                                    }
-                                )
-                                .setColor(
-                                    0x5865F2
-                                )
-                        ]
-                    }
-                );
+                await interaction.reply({
+                    embeds: [
+                        new EmbedBuilder()
+                            .setTitle(
+                                `📺 ${channel.name}`
+                            )
+                            .addFields(
+                                {
+                                    name:
+                                        '🆔 ID',
+                                    value:
+                                        `\`${channel.id}\``
+                                },
+                                {
+                                    name:
+                                        '📁 Type',
+                                    value:
+                                        String(
+                                            channel.type
+                                        )
+                                }
+                            )
+                            .setColor(
+                                0x5865F2
+                            )
+                    ]
+                });
 
                 return;
             }
@@ -2029,42 +1895,43 @@ client.on(
             // ==========================================
 
             if (
-                command === 'grosfdp' ||
-                command === 'rejoin'
+                interaction.commandName ===
+                    'grosfdp' ||
+                interaction.commandName ===
+                    'rejoin'
             ) {
+
+                const member =
+                    interaction.member;
+
                 const channel =
-                    interaction.member?.voice
-                        ?.channel;
+                    member?.voice?.channel;
 
                 if (!channel) {
-                    await safeReply(
-                        interaction,
-                        {
-                            content:
-                                '❌ Tu dois être dans un vocal.',
-                            flags:
-                                MessageFlags.Ephemeral
-                        }
-                    );
+                    await interaction.reply({
+                        content:
+                            '❌ Tu dois être dans un vocal.',
+                        flags:
+                            MessageFlags.Ephemeral
+                    });
 
                     return;
                 }
 
-                const old =
+                const oldConnection =
                     getVoiceConnection(
                         interaction.guild.id
                     );
 
-                if (old) {
-                    old.destroy();
+                if (oldConnection) {
+                    oldConnection.destroy();
                 }
 
                 connectToVoice(
                     channel
                 );
 
-                await safeReply(
-                    interaction,
+                await interaction.reply(
                     `✅ Rejoint **${channel.name}** 🔇🎧`
                 );
 
@@ -2075,30 +1942,30 @@ client.on(
             // /fdp
             // ==========================================
 
-            if (command === 'fdp') {
+            if (
+                interaction.commandName ===
+                'fdp'
+            ) {
+
                 const connection =
                     getVoiceConnection(
                         interaction.guild.id
                     );
 
                 if (!connection) {
-                    await safeReply(
-                        interaction,
-                        {
-                            content:
-                                '❌ Je ne suis dans aucun vocal.',
-                            flags:
-                                MessageFlags.Ephemeral
-                        }
-                    );
+                    await interaction.reply({
+                        content:
+                            '❌ Je ne suis dans aucun vocal.',
+                        flags:
+                            MessageFlags.Ephemeral
+                    });
 
                     return;
                 }
 
                 connection.destroy();
 
-                await safeReply(
-                    interaction,
+                await interaction.reply(
                     '👋 J’ai quitté le vocal.'
                 );
 
@@ -2109,7 +1976,11 @@ client.on(
             // /parle
             // ==========================================
 
-            if (command === 'parle') {
+            if (
+                interaction.commandName ===
+                'parle'
+            ) {
+
                 const channel =
                     await client.channels.fetch(
                         GENERAL_CHANNEL_ID
@@ -2119,15 +1990,12 @@ client.on(
                     !channel ||
                     !channel.isTextBased()
                 ) {
-                    await safeReply(
-                        interaction,
-                        {
-                            content:
-                                '❌ Salon général introuvable.',
-                            flags:
-                                MessageFlags.Ephemeral
-                        }
-                    );
+                    await interaction.reply({
+                        content:
+                            '❌ Salon général introuvable.',
+                        flags:
+                            MessageFlags.Ephemeral
+                    });
 
                     return;
                 }
@@ -2136,86 +2004,86 @@ client.on(
                     'Suis un fdp 💀'
                 );
 
-                await safeReply(
-                    interaction,
-                    {
-                        content:
-                            '✅ Message envoyé.',
-                        flags:
-                            MessageFlags.Ephemeral
-                    }
-                );
+                await interaction.reply({
+                    content:
+                        '✅ Message envoyé.',
+                    flags:
+                        MessageFlags.Ephemeral
+                });
 
                 return;
             }
 
             // ==========================================
-            // COMPTEUR
+            // /compteur
             // ==========================================
 
             if (
-                command === 'compteur' ||
-                command === 'stopcompteur'
+                interaction.commandName ===
+                'compteur'
             ) {
-                if (
-                    interaction.channelId !==
-                    COUNT_CHANNEL_ID
-                ) {
-                    await safeReply(
-                        interaction,
-                        {
-                            content:
-                                `❌ Cette commande fonctionne uniquement dans <#${COUNT_CHANNEL_ID}>.`,
-                            flags:
-                                MessageFlags.Ephemeral
-                        }
-                    );
+
+                if (interaction.channelId !== COUNT_CHANNEL_ID) {
+                    await interaction.reply({
+                        content:
+                            `❌ La commande /compteur fonctionne uniquement dans <#${COUNT_CHANNEL_ID}>.`,
+                        flags:
+                            MessageFlags.Ephemeral
+                    });
 
                     return;
                 }
 
-                if (
-                    command === 'compteur'
-                ) {
-                    if (counting) {
-                        await safeReply(
-                            interaction,
-                            {
-                                content:
-                                    '⚠️ Le compteur tourne déjà.',
-                                flags:
-                                    MessageFlags.Ephemeral
-                            }
-                        );
+                if (counting) {
+                    await interaction.reply({
+                        content:
+                            '⚠️ Le compteur tourne déjà.',
+                        flags:
+                            MessageFlags.Ephemeral
+                    });
 
-                        return;
-                    }
+                    return;
+                }
 
-                    await startCounter();
+                await startCounter();
 
-                    await safeReply(
-                        interaction,
-                        {
-                            content:
-                                `✅ Compteur lancé à **${count - 1}**.`,
-                            flags:
-                                MessageFlags.Ephemeral
-                        }
-                    );
+                await interaction.reply({
+                    content:
+                        `✅ Compteur lancé à **${count - 1}**.`,
+                    flags:
+                        MessageFlags.Ephemeral
+                });
+
+                return;
+            }
+
+            // ==========================================
+            // /stopcompteur
+            // ==========================================
+
+            if (
+                interaction.commandName ===
+                'stopcompteur'
+            ) {
+
+                if (interaction.channelId !== COUNT_CHANNEL_ID) {
+                    await interaction.reply({
+                        content:
+                            `❌ La commande /stopcompteur fonctionne uniquement dans <#${COUNT_CHANNEL_ID}>.`,
+                        flags:
+                            MessageFlags.Ephemeral
+                    });
 
                     return;
                 }
 
                 if (!counting) {
-                    await safeReply(
-                        interaction,
-                        {
-                            content:
-                                `❌ Déjà arrêté à **${count - 1}**.`,
-                            flags:
-                                MessageFlags.Ephemeral
-                        }
-                    );
+                    await interaction.reply({
+                        content:
+                            `❌ Déjà arrêté à **${count - 1}**.`,
+                        flags:
+                            MessageFlags.Ephemeral
+                    });
 
                     return;
                 }
@@ -2225,15 +2093,12 @@ client.on(
 
                 stopCounter();
 
-                await safeReply(
-                    interaction,
-                    {
-                        content:
-                            `🛑 Compteur arrêté à **${lastNumber}**.`,
-                        flags:
-                            MessageFlags.Ephemeral
-                    }
-                );
+                await interaction.reply({
+                    content:
+                        `🛑 Compteur arrêté à **${lastNumber}**.`,
+                    flags:
+                        MessageFlags.Ephemeral
+                });
 
                 return;
             }
@@ -2242,20 +2107,21 @@ client.on(
             // /steamid
             // ==========================================
 
-            if (command === 'steamid') {
+            if (
+                interaction.commandName ===
+                'steamid'
+            ) {
+
                 if (
                     interaction.channelId !==
                     STEAM_CHANNEL_ID
                 ) {
-                    await safeReply(
-                        interaction,
-                        {
-                            content:
-                                '❌ Utilise `/steamid` dans le salon Steam.',
-                            flags:
-                                MessageFlags.Ephemeral
-                        }
-                    );
+                    await interaction.reply({
+                        content:
+                            '❌ Utilise `/steamid` dans le salon Steam.',
+                        flags:
+                            MessageFlags.Ephemeral
+                    });
 
                     return;
                 }
@@ -2265,130 +2131,140 @@ client.on(
                         'jeu'
                     );
 
-                if (
-                    !await safeDefer(
-                        interaction
-                    )
-                ) {
+                await interaction.deferReply();
+
+                const results =
+                    await searchSteamGame(
+                        gameName
+                    );
+
+                if (!results.length) {
+                    await interaction.editReply(
+                        `❌ Aucun jeu trouvé pour **${gameName}**.`
+                    );
+
                     return;
                 }
 
-                try {
-                    const results =
-                        await searchSteamGame(
-                            gameName
-                        );
+                const best =
+                    results[0];
 
-                    if (!results.length) {
-                        await safeEditReply(
-                            interaction,
-                            `❌ Aucun jeu trouvé pour **${gameName}**.`
-                        );
+                let description =
+                    `🎮 **${best.name}**\n` +
+                    `🆔 **Steam App ID :** \`${best.id}\`\n\n` +
+                    `[🔗 Ouvrir sur Steam](https://store.steampowered.com/app/${best.id}/)`;
 
-                        return;
-                    }
+                if (
+                    results.length >
+                    1
+                ) {
+                    description +=
+                        '\n\n**Autres résultats :**\n';
 
-                    const best =
-                        results[0];
-
-                    let description =
-                        `🎮 **${best.name}**\n` +
-                        `🆔 **Steam App ID :** \`${best.id}\`\n\n` +
-                        `[🔗 Ouvrir sur Steam](https://store.steampowered.com/app/${best.id}/)`;
-
-                    if (
-                        results.length > 1
+                    for (
+                        const game of
+                        results.slice(1)
                     ) {
                         description +=
-                            '\n\n**Autres résultats :**\n';
-
-                        for (
-                            const game of
-                            results.slice(1)
-                        ) {
-                            description +=
-                                `• ${game.name} — \`${game.id}\`\n`;
-                        }
+                            `• ${game.name} — \`${game.id}\`\n`;
                     }
-
-                    await safeEditReply(
-                        interaction,
-                        {
-                            embeds: [
-                                new EmbedBuilder()
-                                    .setTitle(
-                                        '🔎 Recherche Steam'
-                                    )
-                                    .setDescription(
-                                        description
-                                    )
-                                    .setColor(
-                                        0x5865F2
-                                    )
-                            ]
-                        }
-                    );
-
-                } catch (error) {
-                    console.error(
-                        '❌ Erreur Steam :',
-                        error
-                    );
-
-                    await safeEditReply(
-                        interaction,
-                        '❌ Erreur pendant la recherche Steam.'
-                    );
                 }
+
+                await interaction.editReply({
+                    embeds: [
+                        new EmbedBuilder()
+                            .setTitle(
+                                '🔎 Recherche Steam'
+                            )
+                            .setDescription(
+                                description
+                            )
+                            .setColor(
+                                0x5865F2
+                            )
+                    ]
+                });
 
                 return;
             }
 
             // ==========================================
-            // RESSOURCES
+            // /onlinefix
             // ==========================================
 
-            const resourceLinks = {
-                onlinefix: [
-                    '⚡ Project Lightning',
-                    'https://project-lightning-web.vercel.app'
-                ],
-                spotifyfree: [
-                    '🎵 Spicetify',
-                    'https://spicetify.app'
-                ],
-                pluginsteam: [
-                    '🧩 SteamBrew',
-                    'https://steambrew.app'
-                ]
-            };
+            if (
+                interaction.commandName ===
+                'onlinefix'
+            ) {
+
+                await interaction.reply({
+                    embeds: [
+                        new EmbedBuilder()
+                            .setTitle(
+                                '⚡ Project Lightning'
+                            )
+                            .setDescription(
+                                '[🌐 Ouvrir Project Lightning](https://project-lightning-web.vercel.app)'
+                            )
+                            .setColor(
+                                0x5865F2
+                            )
+                    ]
+                });
+
+                return;
+            }
+
+            // ==========================================
+            // /spotifyfree
+            // ==========================================
 
             if (
-                resourceLinks[command]
+                interaction.commandName ===
+                'spotifyfree'
             ) {
-                const [
-                    title,
-                    url
-                ] =
-                    resourceLinks[
-                        command
-                    ];
 
-                await safeReply(
-                    interaction,
-                    {
-                        embeds: [
-                            new EmbedBuilder()
-                                .setTitle(title)
-                                .setDescription(
-                                    `[🌐 Ouvrir](${url})`
-                                )
-                                .setColor(
-                                    0x5865F2
-                                )
-                        ]
-                    }
-                );
+                await interaction.reply({
+                    embeds: [
+                        new EmbedBuilder()
+                            .setTitle(
+                                '🎵 Spicetify'
+                            )
+                            .setDescription(
+                                '[🌐 Ouvrir Spicetify](https://spicetify.app)'
+                            )
+                            .setColor(
+                                0x5865F2
+                            )
+                    ]
+                });
+
+                return;
+            }
+
+            // ==========================================
+            // /pluginsteam
+            // ==========================================
+
+            if (
+                interaction.commandName ===
+                'pluginsteam'
+            ) {
+
+                await interaction.reply({
+                    embeds: [
+                        new EmbedBuilder()
+                            .setTitle(
+                                '🧩 Plugins Steam'
+                            )
+                            .setDescription(
+                                '[🌐 Ouvrir SteamBrew](https://steambrew.app)'
+                            )
+                            .setColor(
+                                0x5865F2
+                            )
+                    ]
+                });
 
                 return;
             }
@@ -2397,7 +2273,11 @@ client.on(
             // /panel
             // ==========================================
 
-            if (command === 'panel') {
+            if (
+                interaction.commandName ===
+                'panel'
+            ) {
+
                 const channel =
                     await client.channels.fetch(
                         PANEL_CHANNEL_ID
@@ -2407,15 +2287,12 @@ client.on(
                     !channel ||
                     !channel.isTextBased()
                 ) {
-                    await safeReply(
-                        interaction,
-                        {
-                            content:
-                                '❌ Salon panneau introuvable.',
-                            flags:
-                                MessageFlags.Ephemeral
-                        }
-                    );
+                    await interaction.reply({
+                        content:
+                            '❌ Salon panneau introuvable.',
+                        flags:
+                            MessageFlags.Ephemeral
+                    });
 
                     return;
                 }
@@ -2424,15 +2301,50 @@ client.on(
                     createPanel()
                 );
 
-                await safeReply(
-                    interaction,
-                    {
-                        content:
-                            '✅ Panneau envoyé.',
-                        flags:
-                            MessageFlags.Ephemeral
+                await interaction.reply({
+                    content:
+                        '✅ Panneau envoyé.',
+                    flags:
+                        MessageFlags.Ephemeral
+                });
+
+                return;
+            }
+
+            // ==========================================
+            // /message
+            // ==========================================
+
+            if (
+                interaction.commandName ===
+                'message'
+            ) {
+
+                const text =
+                    interaction.options.getString(
+                        'texte',
+                        true
+                    );
+
+                if (!interaction.channel || !interaction.channel.isTextBased()) {
+                    await interaction.reply({
+                        content: '❌ Ce salon ne permet pas d’envoyer des messages.',
+                        flags: MessageFlags.Ephemeral
+                    });
+                    return;
+                }
+
+                await interaction.channel.send({
+                    content: text,
+                    allowedMentions: {
+                        parse: ['everyone', 'users', 'roles']
                     }
-                );
+                });
+
+                await interaction.reply({
+                    content: '✅ Message envoyé.',
+                    flags: MessageFlags.Ephemeral
+                });
 
                 return;
             }
@@ -2441,7 +2353,11 @@ client.on(
             // /say
             // ==========================================
 
-            if (command === 'say') {
+            if (
+                interaction.commandName ===
+                'say'
+            ) {
+
                 const text =
                     interaction.options.getString(
                         'texte'
@@ -2451,15 +2367,12 @@ client.on(
                     text
                 );
 
-                await safeReply(
-                    interaction,
-                    {
-                        content:
-                            '✅ Message envoyé.',
-                        flags:
-                            MessageFlags.Ephemeral
-                    }
-                );
+                await interaction.reply({
+                    content:
+                        '✅ Message envoyé.',
+                    flags:
+                        MessageFlags.Ephemeral
+                });
 
                 return;
             }
@@ -2468,7 +2381,11 @@ client.on(
             // /kick
             // ==========================================
 
-            if (command === 'kick') {
+            if (
+                interaction.commandName ===
+                'kick'
+            ) {
+
                 const user =
                     interaction.options.getUser(
                         'membre'
@@ -2476,7 +2393,9 @@ client.on(
 
                 const member =
                     await interaction.guild.members
-                        .fetch(user.id)
+                        .fetch(
+                            user.id
+                        )
                         .catch(
                             () => null
                         );
@@ -2485,15 +2404,12 @@ client.on(
                     !member ||
                     !member.kickable
                 ) {
-                    await safeReply(
-                        interaction,
-                        {
-                            content:
-                                '❌ Je ne peux pas expulser ce membre.',
-                            flags:
-                                MessageFlags.Ephemeral
-                        }
-                    );
+                    await interaction.reply({
+                        content:
+                            '❌ Je ne peux pas expulser ce membre.',
+                        flags:
+                            MessageFlags.Ephemeral
+                    });
 
                     return;
                 }
@@ -2508,8 +2424,7 @@ client.on(
                     reason
                 );
 
-                await safeReply(
-                    interaction,
+                await interaction.reply(
                     `👢 **${user.tag}** a été expulsé.\nRaison : ${reason}`
                 );
 
@@ -2520,7 +2435,11 @@ client.on(
             // /ban
             // ==========================================
 
-            if (command === 'ban') {
+            if (
+                interaction.commandName ===
+                'ban'
+            ) {
+
                 const user =
                     interaction.options.getUser(
                         'membre'
@@ -2528,7 +2447,9 @@ client.on(
 
                 const member =
                     await interaction.guild.members
-                        .fetch(user.id)
+                        .fetch(
+                            user.id
+                        )
                         .catch(
                             () => null
                         );
@@ -2537,15 +2458,12 @@ client.on(
                     member &&
                     !member.bannable
                 ) {
-                    await safeReply(
-                        interaction,
-                        {
-                            content:
-                                '❌ Je ne peux pas bannir ce membre.',
-                            flags:
-                                MessageFlags.Ephemeral
-                        }
-                    );
+                    await interaction.reply({
+                        content:
+                            '❌ Je ne peux pas bannir ce membre.',
+                        flags:
+                            MessageFlags.Ephemeral
+                    });
 
                     return;
                 }
@@ -2558,11 +2476,12 @@ client.on(
 
                 await interaction.guild.members.ban(
                     user.id,
-                    { reason }
+                    {
+                        reason
+                    }
                 );
 
-                await safeReply(
-                    interaction,
+                await interaction.reply(
                     `🔨 **${user.tag}** a été banni.\nRaison : ${reason}`
                 );
 
@@ -2573,7 +2492,11 @@ client.on(
             // /timeout
             // ==========================================
 
-            if (command === 'timeout') {
+            if (
+                interaction.commandName ===
+                'timeout'
+            ) {
+
                 const user =
                     interaction.options.getUser(
                         'membre'
@@ -2581,7 +2504,9 @@ client.on(
 
                 const member =
                     await interaction.guild.members
-                        .fetch(user.id)
+                        .fetch(
+                            user.id
+                        )
                         .catch(
                             () => null
                         );
@@ -2590,15 +2515,12 @@ client.on(
                     !member ||
                     !member.moderatable
                 ) {
-                    await safeReply(
-                        interaction,
-                        {
-                            content:
-                                '❌ Je ne peux pas timeout ce membre.',
-                            flags:
-                                MessageFlags.Ephemeral
-                        }
-                    );
+                    await interaction.reply({
+                        content:
+                            '❌ Je ne peux pas exclure ce membre.',
+                        flags:
+                            MessageFlags.Ephemeral
+                    });
 
                     return;
                 }
@@ -2619,9 +2541,8 @@ client.on(
                     reason
                 );
 
-                await safeReply(
-                    interaction,
-                    `⏱️ **${user.tag}** est timeout pendant **${seconds} seconde(s)**.`
+                await interaction.reply(
+                    `⏱️ **${user.tag}** est exclu pendant **${seconds} seconde(s)**.`
                 );
 
                 return;
@@ -2632,8 +2553,10 @@ client.on(
             // ==========================================
 
             if (
-                command === 'untimeout'
+                interaction.commandName ===
+                'untimeout'
             ) {
+
                 const user =
                     interaction.options.getUser(
                         'membre'
@@ -2641,7 +2564,9 @@ client.on(
 
                 const member =
                     await interaction.guild.members
-                        .fetch(user.id)
+                        .fetch(
+                            user.id
+                        )
                         .catch(
                             () => null
                         );
@@ -2650,27 +2575,23 @@ client.on(
                     !member ||
                     !member.moderatable
                 ) {
-                    await safeReply(
-                        interaction,
-                        {
-                            content:
-                                '❌ Je ne peux pas modifier ce membre.',
-                            flags:
-                                MessageFlags.Ephemeral
-                        }
-                    );
+                    await interaction.reply({
+                        content:
+                            '❌ Je ne peux pas modifier ce membre.',
+                        flags:
+                            MessageFlags.Ephemeral
+                    });
 
                     return;
                 }
 
                 await member.timeout(
                     null,
-                    'Timeout retiré'
+                    'Exclusion temporaire retirée'
                 );
 
-                await safeReply(
-                    interaction,
-                    `✅ Timeout retiré pour **${user.tag}**.`
+                await interaction.reply(
+                    `✅ Exclusion retirée pour **${user.tag}**.`
                 );
 
                 return;
@@ -2680,7 +2601,11 @@ client.on(
             // /8ball
             // ==========================================
 
-            if (command === '8ball') {
+            if (
+                interaction.commandName ===
+                '8ball'
+            ) {
+
                 const answers = [
                     'Oui.',
                     'Non.',
@@ -2703,8 +2628,7 @@ client.on(
                         )
                     ];
 
-                await safeReply(
-                    interaction,
+                await interaction.reply(
                     `🎱 **${question}**\n→ ${answer}`
                 );
 
@@ -2715,14 +2639,18 @@ client.on(
             // /coinflip
             // ==========================================
 
-            if (command === 'coinflip') {
-                await safeReply(
-                    interaction,
-                    `🪙 **${
-                        Math.random() < 0.5
-                            ? 'Pile'
-                            : 'Face'
-                    }**`
+            if (
+                interaction.commandName ===
+                'coinflip'
+            ) {
+
+                const result =
+                    Math.random() < 0.5
+                        ? 'Pile'
+                        : 'Face';
+
+                await interaction.reply(
+                    `🪙 **${result}**`
                 );
 
                 return;
@@ -2732,7 +2660,11 @@ client.on(
             // /roll
             // ==========================================
 
-            if (command === 'roll') {
+            if (
+                interaction.commandName ===
+                'roll'
+            ) {
+
                 const max =
                     interaction.options.getInteger(
                         'max'
@@ -2745,8 +2677,7 @@ client.on(
                         max
                     ) + 1;
 
-                await safeReply(
-                    interaction,
+                await interaction.reply(
                     `🎲 **${result}** / ${max}`
                 );
 
@@ -2757,7 +2688,11 @@ client.on(
             // /random
             // ==========================================
 
-            if (command === 'random') {
+            if (
+                interaction.commandName ===
+                'random'
+            ) {
+
                 let min =
                     interaction.options.getInteger(
                         'min'
@@ -2788,8 +2723,7 @@ client.on(
                         )
                     ) + min;
 
-                await safeReply(
-                    interaction,
+                await interaction.reply(
                     `🎯 **${result}**`
                 );
 
@@ -2801,11 +2735,12 @@ client.on(
             // ==========================================
 
             const clearMatch =
-                command.match(
+                interaction.commandName.match(
                     /^clear(10|20|30|40|50|60|70|80|90|100)$/
                 );
 
             if (clearMatch) {
+
                 const amount =
                     Number(
                         clearMatch[1]
@@ -2816,37 +2751,30 @@ client.on(
                         PermissionFlagsBits.ManageMessages
                     )
                 ) {
-                    await safeReply(
-                        interaction,
-                        {
-                            content:
-                                '❌ Tu dois avoir **Gérer les messages**.',
-                            flags:
-                                MessageFlags.Ephemeral
-                        }
-                    );
+                    await interaction.reply({
+                        content:
+                            '❌ Tu dois avoir **Gérer les messages**.',
+                        flags:
+                            MessageFlags.Ephemeral
+                    });
 
                     return;
                 }
 
                 const botMember =
-                    interaction.guild
-                        .members.me;
+                    interaction.guild.members.me;
 
                 if (
                     !botMember?.permissions.has(
                         PermissionFlagsBits.ManageMessages
                     )
                 ) {
-                    await safeReply(
-                        interaction,
-                        {
-                            content:
-                                '❌ Je dois avoir **Gérer les messages**.',
-                            flags:
-                                MessageFlags.Ephemeral
-                        }
-                    );
+                    await interaction.reply({
+                        content:
+                            '❌ Je dois avoir **Gérer les messages**.',
+                        flags:
+                            MessageFlags.Ephemeral
+                    });
 
                     return;
                 }
@@ -2855,15 +2783,12 @@ client.on(
                     !interaction.channel ||
                     !interaction.channel.isTextBased()
                 ) {
-                    await safeReply(
-                        interaction,
-                        {
-                            content:
-                                '❌ Cette commande ne fonctionne pas ici.',
-                            flags:
-                                MessageFlags.Ephemeral
-                        }
-                    );
+                    await interaction.reply({
+                        content:
+                            '❌ Cette commande ne fonctionne pas ici.',
+                        flags:
+                            MessageFlags.Ephemeral
+                    });
 
                     return;
                 }
@@ -2874,70 +2799,44 @@ client.on(
                         true
                     );
 
-                await safeReply(
-                    interaction,
-                    {
-                        content:
-                            `🧹 **${deleted.size}** message(s) supprimé(s).`,
-                        flags:
-                            MessageFlags.Ephemeral
-                    }
-                );
+                await interaction.reply({
+                    content:
+                        `🧹 **${deleted.size}** message(s) supprimé(s).`,
+                    flags:
+                        MessageFlags.Ephemeral
+                });
 
                 return;
             }
 
         } catch (error) {
+
             console.error(
                 '❌ Interaction error :',
                 error
             );
 
-            // IMPORTANT :
-            // si Discord dit que l'interaction est déjà traitée
-            // ou expirée, on ne tente surtout pas une deuxième réponse.
             if (
-                error?.code === 40060 ||
-                error?.code === 10062 ||
-                error?.status === 404
+                interaction.replied ||
+                interaction.deferred
             ) {
-                return;
-            }
-
-            try {
-                if (
-                    interaction.deferred ||
-                    interaction.replied
-                ) {
-                    await interaction.editReply(
-                        '❌ Une erreur est survenue.'
-                    );
-                } else {
-                    await interaction.reply({
-                        content:
-                            '❌ Une erreur est survenue.',
-                        flags:
-                            MessageFlags.Ephemeral
-                    });
-                }
-            } catch (replyError) {
-                if (
-                    !isInteractionGone(
-                        replyError
-                    )
-                ) {
-                    console.error(
-                        '❌ Impossible de répondre :',
-                        replyError
-                    );
-                }
+                await interaction.editReply(
+                    '❌ Une erreur est survenue.'
+                );
+            } else {
+                await interaction.reply({
+                    content:
+                        '❌ Une erreur est survenue.',
+                    flags:
+                        MessageFlags.Ephemeral
+                });
             }
         }
     }
 );
 
 // ==================================================
-// ERREURS PROCESS
+// ERREURS
 // ==================================================
 
 process.on(
@@ -2966,7 +2865,7 @@ process.on(
 
 if (!process.env.TOKEN) {
     console.error(
-        '❌ TOKEN absent.'
+        '❌ TOKEN absent du fichier .env'
     );
 
     process.exit(1);
@@ -2974,7 +2873,7 @@ if (!process.env.TOKEN) {
 
 if (!process.env.GEMINI_API_KEY) {
     console.warn(
-        '⚠️ GEMINI_API_KEY absente.'
+        '⚠️ GEMINI_API_KEY absent. Le bot démarrera, mais /ia sera désactivé.'
     );
 }
 
@@ -2985,3 +2884,4 @@ if (!process.env.GEMINI_API_KEY) {
 client.login(
     process.env.TOKEN
 );
+// Railway redeploy
