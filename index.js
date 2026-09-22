@@ -24,7 +24,6 @@ const {
 } = require('@discordjs/voice');
 
 
-
 // ==================================================
 // CLIENT
 // ==================================================
@@ -42,7 +41,7 @@ const client = new Client({
 // GROQ
 // ==================================================
 
-const GROQ_MODEL = 'openai/gpt-oss-120b';
+const GROQ_TEXT_MODEL = 'openai/gpt-oss-120b';
 const GROQ_VISION_MODEL = 'qwen/qwen3.8-27b';
 
 // ==================================================
@@ -427,82 +426,149 @@ async function searchSteamGame(gameName) {
 // IA
 // ==================================================
 
-async function askAI(channelId, question, userName, imageUrls = []) {
+async function askAI(
+    channelId,
+    question,
+    userName,
+    imageUrls = []
+) {
     if (!process.env.GROQ_API_KEY) {
         throw new Error('GROQ_API_KEY absente.');
     }
 
     const history = getHistory(channelId);
 
-    const systemPrompt = `Tu es KTR.BOT, un assistant IA intégré à Discord.
+    const systemPrompt = `
+Tu es KTR/IA, une intelligence artificielle intégrée à Discord et propulsée par Groq.
+
 Tu réponds en français sauf si l'utilisateur demande une autre langue.
-Tu aides pour la programmation, les bots Discord, le dépannage, les jeux vidéo et les questions générales.
-Tu peux analyser les images envoyées.
-Quand une image est fournie, décris uniquement ce qui est réellement visible et lis le texte visible quand c'est possible.
-Quand tu fournis du code, donne du code complet quand c'est pertinent et explique exactement où le mettre.
-Sois utile, direct et clair. Utilise des emojis avec modération.
-Nom Discord de l'utilisateur : ${userName}`;
+
+IMPORTANT :
+- Tu es KTR/IA propulsé par Groq.
+- Ne dis jamais que tu es ChatGPT.
+- Ne dis jamais que tu es une IA développée par OpenAI.
+- Si on te demande qui tu es, réponds que tu es KTR/IA, propulsé par Groq.
+
+Tu aides notamment pour :
+- programmation JavaScript / Node.js / Python
+- création et modification de bots Discord
+- dépannage d'erreurs
+- explications techniques
+- idées de projets
+- jeux vidéo
+- questions générales
+
+Quand une image est fournie :
+- analyse uniquement ce qui est réellement visible
+- lis le texte visible quand c'est possible
+- ne prétends pas voir quelque chose qui n'est pas clairement visible
+
+Quand tu fournis du code :
+- donne du code complet quand c'est pertinent
+- explique exactement où le mettre
+- évite de supprimer des fonctionnalités existantes sans raison
+- signale les erreurs probables
+- privilégie les solutions simples et fonctionnelles
+
+Sois utile, direct et clair.
+Nom Discord de l'utilisateur : ${userName}
+`;
 
     const messages = [
-        { role: 'system', content: systemPrompt },
+        {
+            role: 'system',
+            content: systemPrompt
+        },
         ...history.map(item => ({
             role: item.role === 'assistant' ? 'assistant' : 'user',
-            content: typeof item.content === 'string' ? item.content : '[Image envoyée précédemment]'
+            content: typeof item.content === 'string'
+                ? item.content
+                : '[Image envoyée précédemment]'
         }))
     ];
 
-    let currentContent = question?.trim() || (imageUrls.length ? 'Analyse cette image.' : 'Bonjour.');
-    let model = GROQ_MODEL;
+    const currentText =
+        question?.trim() ||
+        (imageUrls.length ? 'Analyse cette image.' : 'Bonjour.');
 
     if (imageUrls.length) {
-        model = GROQ_VISION_MODEL;
-        currentContent = [
-            { type: 'text', text: currentContent },
-            ...imageUrls.slice(0, 3).map(url => ({
-                type: 'image_url',
-                image_url: { url }
-            }))
-        ];
+        messages.push({
+            role: 'user',
+            content: [
+                {
+                    type: 'text',
+                    text: currentText
+                },
+                ...imageUrls.slice(0, 3).map(url => ({
+                    type: 'image_url',
+                    image_url: {
+                        url
+                    }
+                }))
+            ]
+        });
+    } else {
+        messages.push({
+            role: 'user',
+            content: currentText
+        });
     }
 
-    messages.push({ role: 'user', content: currentContent });
+    const model =
+        imageUrls.length > 0
+            ? GROQ_VISION_MODEL
+            : GROQ_TEXT_MODEL;
 
-    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${process.env.GROQ_API_KEY}`
-        },
-        body: JSON.stringify({
-            model,
-            messages,
-            temperature: 0.7,
-            max_completion_tokens: 4096
-        })
-    });
+    const response = await fetch(
+        'https://api.groq.com/openai/v1/chat/completions',
+        {
+            method: 'POST',
+            headers: {
+                'Authorization':
+                    `Bearer ${process.env.GROQ_API_KEY}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                model,
+                messages,
+                temperature: 0.7,
+                max_completion_tokens: 4096
+            })
+        }
+    );
 
     const data = await response.json().catch(() => ({}));
 
     if (!response.ok) {
-        const detail = data?.error?.message || `HTTP ${response.status}`;
-        const retryAfter = response.headers.get('retry-after');
-        if (response.status === 429) {
-            throw new Error(`Groq API 429: limite atteinte${retryAfter ? ` — réessaie dans ${retryAfter}s` : ''}.`);
-        }
-        throw new Error(`Groq API ${response.status}: ${detail}`);
+        const message =
+            data?.error?.message ||
+            `HTTP ${response.status}`;
+
+        throw new Error(
+            `Groq ${response.status}: ${message}`
+        );
     }
 
-    const answer = data?.choices?.[0]?.message?.content?.trim();
+    const answer =
+        data?.choices?.[0]?.message?.content?.trim();
 
     if (!answer) {
         throw new Error('Réponse Groq vide.');
     }
 
-    addHistory(channelId, 'user', imageUrls.length > 0
-        ? `${question || 'Analyse cette image.'}\n[Image envoyée]`
-        : question
+    addHistory(
+        channelId,
+        'user',
+        imageUrls.length > 0
+            ? `${question || 'Analyse cette image.'}\n[Image envoyée]`
+            : question
     );
-    addHistory(channelId, 'assistant', answer);
+
+    addHistory(
+        channelId,
+        'assistant',
+        answer
+    );
 
     return answer;
 }
@@ -628,11 +694,80 @@ function formatUptime(ms) {
     );
 }
 
+
+// ==================================================
+// 50 NOUVELLES COMMANDES
+// ==================================================
+
+const extraCommands = [
+    new SlashCommandBuilder().setName('servericon').setDescription('Affiche l’icône du serveur'),
+    new SlashCommandBuilder().setName('serverbanner').setDescription('Affiche la bannière du serveur'),
+    new SlashCommandBuilder().setName('membercount').setDescription('Affiche le nombre de membres'),
+    new SlashCommandBuilder().setName('rolecount').setDescription('Affiche le nombre de rôles'),
+    new SlashCommandBuilder().setName('channelcount').setDescription('Affiche le nombre de salons'),
+    new SlashCommandBuilder().setName('voicecount').setDescription('Compte les salons vocaux'),
+    new SlashCommandBuilder().setName('textcount').setDescription('Compte les salons textuels'),
+    new SlashCommandBuilder().setName('emojilist').setDescription('Liste les emojis du serveur'),
+    new SlashCommandBuilder().setName('stickerlist').setDescription('Liste les stickers du serveur'),
+    new SlashCommandBuilder().setName('rolelist').setDescription('Liste les rôles du serveur'),
+    new SlashCommandBuilder().setName('channellist').setDescription('Liste les salons du serveur'),
+    new SlashCommandBuilder().setName('owner').setDescription('Affiche le propriétaire du serveur'),
+    new SlashCommandBuilder().setName('servercreated').setDescription('Affiche la date de création du serveur'),
+    new SlashCommandBuilder().setName('boosts').setDescription('Affiche les boosts du serveur'),
+    new SlashCommandBuilder().setName('whoami').setDescription('Affiche tes informations'),
+    new SlashCommandBuilder().setName('mention').setDescription('Mentionne un membre').addUserOption(o => o.setName('membre').setDescription('Membre à mentionner').setRequired(true)),
+    new SlashCommandBuilder().setName('channelid').setDescription('Affiche l’ID du salon actuel'),
+    new SlashCommandBuilder().setName('timestamp').setDescription('Crée un timestamp Discord').addStringOption(o => o.setName('texte').setDescription('Texte du timestamp').setRequired(true)),
+    new SlashCommandBuilder().setName('snowflake').setDescription('Affiche les informations d’un ID Discord').addStringOption(o => o.setName('id').setDescription('ID Discord').setRequired(true)),
+    new SlashCommandBuilder().setName('website').setDescription('Affiche le site de KTR/IA'),
+    new SlashCommandBuilder().setName('support').setDescription('Affiche le contact du support'),
+    new SlashCommandBuilder().setName('rules').setDescription('Affiche un rappel des règles'),
+    new SlashCommandBuilder().setName('suggestion').setDescription('Crée une suggestion').addStringOption(o => o.setName('texte').setDescription('Ta suggestion').setRequired(true)),
+    new SlashCommandBuilder().setName('poll').setDescription('Crée un mini sondage').addStringOption(o => o.setName('question').setDescription('Question du sondage').setRequired(true)),
+    new SlashCommandBuilder().setName('choose').setDescription('Choisit entre plusieurs options').addStringOption(o => o.setName('options').setDescription('Options séparées par une virgule').setRequired(true)),
+    new SlashCommandBuilder().setName('joke').setDescription('Raconte une blague'),
+    new SlashCommandBuilder().setName('fact').setDescription('Donne un fait aléatoire'),
+    new SlashCommandBuilder().setName('quote').setDescription('Donne une citation'),
+    new SlashCommandBuilder().setName('ship').setDescription('Calcule un pourcentage de compatibilité').addUserOption(o => o.setName('membre1').setDescription('Premier membre').setRequired(true)).addUserOption(o => o.setName('membre2').setDescription('Deuxième membre').setRequired(true)),
+    new SlashCommandBuilder().setName('rate').setDescription('Note quelque chose sur 10').addStringOption(o => o.setName('texte').setDescription('Ce que tu veux noter').setRequired(true)),
+    new SlashCommandBuilder().setName('hug').setDescription('Fait un câlin à un membre').addUserOption(o => o.setName('membre').setDescription('Membre').setRequired(true)),
+    new SlashCommandBuilder().setName('kiss').setDescription('Fait un bisou à un membre').addUserOption(o => o.setName('membre').setDescription('Membre').setRequired(true)),
+    new SlashCommandBuilder().setName('slap').setDescription('Met une gifle virtuelle').addUserOption(o => o.setName('membre').setDescription('Membre').setRequired(true)),
+    new SlashCommandBuilder().setName('pat').setDescription('Fait une caresse virtuelle').addUserOption(o => o.setName('membre').setDescription('Membre').setRequired(true)),
+    new SlashCommandBuilder().setName('highfive').setDescription('Tape dans la main d’un membre').addUserOption(o => o.setName('membre').setDescription('Membre').setRequired(true)),
+    new SlashCommandBuilder().setName('bonk').setDescription('BONK un membre').addUserOption(o => o.setName('membre').setDescription('Membre').setRequired(true)),
+    new SlashCommandBuilder().setName('dance').setDescription('Danse'),
+    new SlashCommandBuilder().setName('wave').setDescription('Fait coucou'),
+    new SlashCommandBuilder().setName('shrug').setDescription('Affiche un shrug'),
+    new SlashCommandBuilder().setName('tableflip').setDescription('Retourne une table'),
+    new SlashCommandBuilder().setName('unflip').setDescription('Remet la table'),
+    new SlashCommandBuilder().setName('coin').setDescription('Lance une pièce'),
+    new SlashCommandBuilder().setName('color').setDescription('Génère une couleur aléatoire'),
+    new SlashCommandBuilder().setName('reverse').setDescription('Inverse un texte').addStringOption(o => o.setName('texte').setDescription('Texte').setRequired(true)),
+    new SlashCommandBuilder().setName('uppercase').setDescription('Met un texte en majuscules').addStringOption(o => o.setName('texte').setDescription('Texte').setRequired(true)),
+    new SlashCommandBuilder().setName('lowercase').setDescription('Met un texte en minuscules').addStringOption(o => o.setName('texte').setDescription('Texte').setRequired(true)),
+    new SlashCommandBuilder().setName('countdown').setDescription('Lance un compte à rebours').addIntegerOption(o => o.setName('secondes').setDescription('Secondes').setMinValue(1).setMaxValue(60).setRequired(true)),
+    new SlashCommandBuilder().setName('calc').setDescription('Calcule une expression').addStringOption(o => o.setName('expression').setDescription('Exemple : 12 * (5 + 2)').setRequired(true)),
+    new SlashCommandBuilder().setName('remindme').setDescription('Crée un rappel').addIntegerOption(o => o.setName('minutes').setDescription('Minutes').setMinValue(1).setMaxValue(1440).setRequired(true)).addStringOption(o => o.setName('texte').setDescription('Rappel').setRequired(true)),
+    new SlashCommandBuilder().setName('serverstatus').setDescription('Affiche l’état des membres du serveur')
+];
+
+const messageCommand = new SlashCommandBuilder()
+    .setName('message')
+    .setDescription('Faire envoyer un message par le bot')
+    .addStringOption(o =>
+        o.setName('texte')
+            .setDescription('Message à envoyer')
+            .setRequired(true)
+    );
+
 // ==================================================
 // COMMANDES
 // ==================================================
 
 const commands = [
+    messageCommand,
+    ...extraCommands,
     new SlashCommandBuilder()
         .setName('help')
         .setDescription(
@@ -807,15 +942,19 @@ const commands = [
                     .setRequired(false)
         ),
 
-
     new SlashCommandBuilder()
         .setName('message')
-        .setDescription('Faire envoyer un message par le bot')
-        .addStringOption(option =>
-            option
-                .setName('texte')
-                .setDescription('Message à envoyer')
-                .setRequired(true)
+        .setDescription(
+            'Fait envoyer un message par le bot'
+        )
+        .addStringOption(
+            option =>
+                option
+                    .setName('texte')
+                    .setDescription(
+                        'Message à envoyer'
+                    )
+                    .setRequired(true)
         ),
 
     new SlashCommandBuilder()
@@ -1085,6 +1224,8 @@ client.once(
         console.log(
             '🟢 Statut : En ligne'
         );
+
+        
 
         await registerCommands();
 
@@ -1358,66 +1499,6 @@ client.on(
             }
 
             // ==========================================
-            // /message
-            // ==========================================
-
-            if (
-                interaction.commandName ===
-                'message'
-            ) {
-                const texte =
-                    interaction.options.getString(
-                        'texte'
-                    );
-
-                if (
-                    !interaction.channel ||
-                    !interaction.channel.isTextBased()
-                ) {
-                    await interaction.reply({
-                        content:
-                            '❌ Cette commande ne fonctionne pas ici.',
-                        flags:
-                            MessageFlags.Ephemeral
-                    });
-                    return;
-                }
-
-                try {
-                    await interaction.channel.send({
-                        content: texte,
-                        allowedMentions: {
-                            parse: ['everyone', 'users', 'roles']
-                        }
-                    });
-
-                    await interaction.reply({
-                        content: '✅ Message envoyé.',
-                        flags: MessageFlags.Ephemeral
-                    });
-                } catch (error) {
-                    console.error(
-                        '❌ Erreur /message :',
-                        error
-                    );
-
-                    if (
-                        !interaction.replied &&
-                        !interaction.deferred
-                    ) {
-                        await interaction.reply({
-                            content:
-                                '❌ Impossible d’envoyer le message.',
-                            flags:
-                                MessageFlags.Ephemeral
-                        });
-                    }
-                }
-
-                return;
-            }
-
-            // ==========================================
             // /help
             // ==========================================
 
@@ -1434,24 +1515,30 @@ client.on(
                         .setDescription(
                             '**🤖 IA**\n' +
                             '`/ia question:`\n' +
-                            'Le salon est renouvelé après 2 minutes sans nouveau message.\n\n' +
+                            'Salon IA renouvelé après 2 minutes sans activité.\n\n' +
 
                             '**🔊 Vocal**\n' +
                             '`/grosfdp` `/rejoin` `/fdp`\n\n' +
 
                             '**🛠️ Modération**\n' +
-                            '`/clear10` → `/clear100` `' +
-                            '`/kick` `/ban` `/timeout` `/untimeout` `/say` `/message`\n\n' +
+                            '`/clear10` → `/clear100` `/kick` `/ban` `/timeout` `/untimeout` `/say`\n\n' +
 
                             '**📊 Infos**\n' +
-                            '`/ping` `/uptime` `/avatar` `' +
-                            '`/userinfo` `/serverinfo` `/botinfo` `/channelinfo`\n\n' +
+                            '`/ping` `/uptime` `/avatar` `/userinfo` `/serverinfo` `/botinfo` `/channelinfo`\n\n' +
 
                             '**🎮 Steam / Ressources**\n' +
                             '`/steamid` `/onlinefix` `/spotifyfree` `/pluginsteam` `/panel`\n\n' +
 
                             '**🔢 Outils**\n' +
-                            '`/compteur` `/stopcompteur` `/8ball` `/coinflip` `/roll` `/random`'
+                            '`/compteur` `/stopcompteur` `/8ball` `/coinflip` `/roll` `/random`\n\n' +
+
+                            '**🆕 50 nouvelles commandes**\n' +
+                            '`/servericon` `/serverbanner` `/membercount` `/rolecount` `/channelcount` `/voicecount` `/textcount`\n' +
+                            '`/emojilist` `/stickerlist` `/rolelist` `/channellist` `/owner` `/servercreated` `/boosts` `/whoami`\n' +
+                            '`/mention` `/channelid` `/timestamp` `/snowflake` `/website` `/support` `/rules` `/suggestion` `/poll`\n' +
+                            '`/choose` `/joke` `/fact` `/quote` `/ship` `/rate` `/hug` `/kiss` `/slap` `/pat` `/highfive` `/bonk`\n' +
+                            '`/dance` `/wave` `/shrug` `/tableflip` `/unflip` `/coin` `/color` `/reverse` `/uppercase` `/lowercase`\n' +
+                            '`/countdown` `/calc` `/remindme` `/serverstatus`'
                         )
                         .setColor(
                             0x5865F2
@@ -2255,6 +2342,44 @@ client.on(
             }
 
             // ==========================================
+            // /message
+            // ==========================================
+
+            if (
+                interaction.commandName ===
+                'message'
+            ) {
+
+                const text =
+                    interaction.options.getString(
+                        'texte',
+                        true
+                    );
+
+                if (!interaction.channel || !interaction.channel.isTextBased()) {
+                    await interaction.reply({
+                        content: '❌ Ce salon ne permet pas d’envoyer des messages.',
+                        flags: MessageFlags.Ephemeral
+                    });
+                    return;
+                }
+
+                await interaction.channel.send({
+                    content: text,
+                    allowedMentions: {
+                        parse: ['everyone', 'users', 'roles']
+                    }
+                });
+
+                await interaction.reply({
+                    content: '✅ Message envoyé.',
+                    flags: MessageFlags.Ephemeral
+                });
+
+                return;
+            }
+
+            // ==========================================
             // /say
             // ==========================================
 
@@ -2635,7 +2760,400 @@ client.on(
                 return;
             }
 
+            
             // ==========================================
+            // /message + 50 nouvelles commandes
+            // ==========================================
+
+            if (interaction.commandName === 'message') {
+                const texte = interaction.options.getString('texte');
+
+                if (!interaction.channel?.isTextBased()) {
+                    await interaction.reply({
+                        content: '❌ Salon incompatible.',
+                        flags: MessageFlags.Ephemeral
+                    });
+                    return;
+                }
+
+                await interaction.channel.send({
+                    content: texte,
+                    allowedMentions: {
+                        parse: ['everyone', 'users', 'roles']
+                    }
+                });
+
+                await interaction.reply({
+                    content: '✅ Message envoyé.',
+                    flags: MessageFlags.Ephemeral
+                });
+
+                return;
+            }
+
+            const extra = interaction.commandName;
+
+            if (extra === 'servericon') {
+                const url = interaction.guild.iconURL({ size: 1024 });
+                await interaction.reply(url ? `🖼️ ${url}` : '❌ Ce serveur n’a pas d’icône.');
+                return;
+            }
+
+            if (extra === 'serverbanner') {
+                const url = interaction.guild.bannerURL({ size: 2048 });
+                await interaction.reply(url ? `🖼️ ${url}` : '❌ Ce serveur n’a pas de bannière.');
+                return;
+            }
+
+            if (extra === 'membercount') {
+                await interaction.reply(`👥 **${interaction.guild.memberCount}** membres.`);
+                return;
+            }
+
+            if (extra === 'rolecount') {
+                await interaction.reply(`🏷️ **${interaction.guild.roles.cache.size}** rôles.`);
+                return;
+            }
+
+            if (extra === 'channelcount') {
+                await interaction.reply(`📚 **${interaction.guild.channels.cache.size}** salons.`);
+                return;
+            }
+
+            if (extra === 'voicecount') {
+                await interaction.reply(`🔊 **${interaction.guild.channels.cache.filter(c => c.type === ChannelType.GuildVoice || c.type === ChannelType.GuildStageVoice).size}** salons vocaux.`);
+                return;
+            }
+
+            if (extra === 'textcount') {
+                await interaction.reply(`💬 **${interaction.guild.channels.cache.filter(c => c.isTextBased()).size}** salons textuels.`);
+                return;
+            }
+
+            if (extra === 'emojilist') {
+                const list = interaction.guild.emojis.cache.map(e => `${e} \`${e.name}\``);
+                await interaction.reply(list.length ? list.slice(0, 80).join(' ') : '😶 Aucun emoji.');
+                return;
+            }
+
+            if (extra === 'stickerlist') {
+                const list = interaction.guild.stickers.cache.map(s => `• ${s.name}`);
+                await interaction.reply(list.length ? list.slice(0, 80).join('\n') : '😶 Aucun sticker.');
+                return;
+            }
+
+            if (extra === 'rolelist') {
+                const list = interaction.guild.roles.cache
+                    .filter(r => r.id !== interaction.guild.id)
+                    .sort((a, b) => b.position - a.position)
+                    .map(r => `<@&${r.id}>`)
+                    .slice(0, 80);
+                await interaction.reply(list.length ? list.join(' ') : '😶 Aucun rôle.');
+                return;
+            }
+
+            if (extra === 'channellist') {
+                const list = interaction.guild.channels.cache
+                    .sort((a, b) => a.rawPosition - b.rawPosition)
+                    .map(c => `• ${c} — \`${c.name}\``)
+                    .slice(0, 60);
+                await interaction.reply(list.join('\n') || '😶 Aucun salon.');
+                return;
+            }
+
+            if (extra === 'owner') {
+                const owner = await interaction.guild.fetchOwner();
+                await interaction.reply(`👑 Propriétaire : ${owner.user} (\`${owner.user.tag}\`)`);
+                return;
+            }
+
+            if (extra === 'servercreated') {
+                await interaction.reply(`📅 Serveur créé : <t:${Math.floor(interaction.guild.createdTimestamp / 1000)}:F>`);
+                return;
+            }
+
+            if (extra === 'boosts') {
+                await interaction.reply(`🚀 Boosts : **${interaction.guild.premiumSubscriptionCount || 0}** — niveau **${interaction.guild.premiumTier}**.`);
+                return;
+            }
+
+            if (extra === 'whoami') {
+                await interaction.reply(`👤 Tu es **${interaction.user.tag}**\n🆔 \`${interaction.user.id}\``);
+                return;
+            }
+
+            if (extra === 'mention') {
+                const user = interaction.options.getUser('membre', true);
+                await interaction.reply(`👋 Salut ${user} !`);
+                return;
+            }
+
+            if (extra === 'channelid') {
+                await interaction.reply(`🆔 Salon : \`${interaction.channelId}\``);
+                return;
+            }
+
+            if (extra === 'timestamp') {
+                const texte = interaction.options.getString('texte', true);
+                const unix = Math.floor(Date.now() / 1000);
+                await interaction.reply(`${texte} : <t:${unix}:F> — \`<t:${unix}:F>\``);
+                return;
+            }
+
+            if (extra === 'snowflake') {
+                const id = interaction.options.getString('id', true);
+                const ok = /^\d{17,20}$/.test(id);
+                await interaction.reply(ok ? `🆔 Snowflake valide : \`${id}\`` : '❌ ID Discord invalide.');
+                return;
+            }
+
+            if (extra === 'website') {
+                await interaction.reply('🌐 https://ktr13k14.github.io/site-du-bot/');
+                return;
+            }
+
+            if (extra === 'support') {
+                await interaction.reply('🛠️ Support KTR/IA : contacte le propriétaire du bot.');
+                return;
+            }
+
+            if (extra === 'rules') {
+                await interaction.reply('📜 **Rappel :** respecte les autres, pas de spam, pas de contenu illégal et respecte les règles du serveur.');
+                return;
+            }
+
+            if (extra === 'suggestion') {
+                const texte = interaction.options.getString('texte', true);
+                await interaction.reply(`💡 **Suggestion de ${interaction.user}:**\n${texte}`);
+                return;
+            }
+
+            if (extra === 'poll') {
+                const question = interaction.options.getString('question', true);
+                const msg = await interaction.reply({
+                    content: `📊 **SONDAGE**\n${question}\n\n👍 Oui\n👎 Non`,
+                    fetchReply: true
+                });
+                await msg.react('👍');
+                await msg.react('👎');
+                return;
+            }
+
+            if (extra === 'choose') {
+                const options = interaction.options.getString('options', true)
+                    .split(',')
+                    .map(x => x.trim())
+                    .filter(Boolean);
+
+                if (!options.length) {
+                    await interaction.reply('❌ Donne au moins une option.');
+                    return;
+                }
+
+                const chosen = options[Math.floor(Math.random() * options.length)];
+                await interaction.reply(`🎯 Je choisis : **${chosen}**`);
+                return;
+            }
+
+            if (extra === 'joke') {
+                const jokes = [
+                    'Pourquoi les développeurs aiment le dark mode ? Parce que la lumière attire les bugs. 💀',
+                    'Mon bot ne dort jamais. Il attend juste le prochain bug. 🤖',
+                    'Pourquoi le serveur est calme ? Le bot vient de couper le spam. 😂'
+                ];
+                await interaction.reply(jokes[Math.floor(Math.random() * jokes.length)]);
+                return;
+            }
+
+            if (extra === 'fact') {
+                const facts = [
+                    '🧠 Les pieuvres ont trois cœurs.',
+                    '🌍 Une journée sur Vénus dure plus longtemps que son année.',
+                    '🐙 Les pieuvres ont du sang bleu.',
+                    '⚡ La foudre peut chauffer l’air à des températures extrêmes.'
+                ];
+                await interaction.reply(facts[Math.floor(Math.random() * facts.length)]);
+                return;
+            }
+
+            if (extra === 'quote') {
+                const quotes = [
+                    '🔥 « Le meilleur moment pour commencer, c’est maintenant. »',
+                    '💡 « Les erreurs font partie de l’apprentissage. »',
+                    '🚀 « Construis, teste, améliore. »'
+                ];
+                await interaction.reply(quotes[Math.floor(Math.random() * quotes.length)]);
+                return;
+            }
+
+            if (extra === 'ship') {
+                const a = interaction.options.getUser('membre1', true);
+                const b = interaction.options.getUser('membre2', true);
+                const score = Math.floor(Math.random() * 101);
+                await interaction.reply(`💘 ${a} + ${b} = **${score}%** de compatibilité.`);
+                return;
+            }
+
+            if (extra === 'rate') {
+                const texte = interaction.options.getString('texte', true);
+                const score = (Math.random() * 10).toFixed(1);
+                await interaction.reply(`⭐ **${texte}** → **${score}/10**`);
+                return;
+            }
+
+            const reactions = {
+                hug: '🤗',
+                kiss: '😘',
+                slap: '👋',
+                pat: '🥹',
+                highfive: '✋',
+                bonk: '🔨'
+            };
+
+            if (reactions[extra]) {
+                const user = interaction.options.getUser('membre', true);
+                const texts = {
+                    hug: `🤗 ${interaction.user} fait un câlin à ${user} !`,
+                    kiss: `😘 ${interaction.user} fait un bisou à ${user} !`,
+                    slap: `👋 ${interaction.user} met une petite gifle à ${user} !`,
+                    pat: `🥹 ${interaction.user} caresse ${user} !`,
+                    highfive: `✋ ${interaction.user} tape dans la main de ${user} !`,
+                    bonk: `🔨 ${interaction.user} fait BONK à ${user} !`
+                };
+                await interaction.reply(texts[extra]);
+                return;
+            }
+
+            if (extra === 'dance') {
+                await interaction.reply('💃🕺 KTR/IA DANCE MODE ACTIVÉ 💃🕺');
+                return;
+            }
+
+            if (extra === 'wave') {
+                await interaction.reply('👋 Coucou tout le monde !');
+                return;
+            }
+
+            if (extra === 'shrug') {
+                await interaction.reply('¯\\\\_(ツ)_/¯');
+                return;
+            }
+
+            if (extra === 'tableflip') {
+                await interaction.reply('(╯°□°）╯︵ ┻━┻');
+                return;
+            }
+
+            if (extra === 'unflip') {
+                await interaction.reply('┬─┬ノ( º _ ºノ)');
+                return;
+            }
+
+            if (extra === 'coin') {
+                await interaction.reply(Math.random() < 0.5 ? '🪙 **Pile !**' : '🪙 **Face !**');
+                return;
+            }
+
+            if (extra === 'color') {
+                const hex = '#' + Math.floor(Math.random() * 0xFFFFFF).toString(16).padStart(6, '0').toUpperCase();
+                await interaction.reply(`🎨 Couleur : **${hex}**`);
+                return;
+            }
+
+            if (extra === 'reverse' || extra === 'uppercase' || extra === 'lowercase') {
+                const texte = interaction.options.getString('texte', true);
+                let result = texte;
+
+                if (extra === 'reverse') {
+                    result = [...texte].reverse().join('');
+                } else if (extra === 'uppercase') {
+                    result = texte.toUpperCase();
+                } else {
+                    result = texte.toLowerCase();
+                }
+
+                await interaction.reply(result.slice(0, 1900));
+                return;
+            }
+
+            if (extra === 'countdown') {
+                const seconds = interaction.options.getInteger('secondes', true);
+                await interaction.reply(`⏳ **${seconds}s**...`);
+
+                let remaining = seconds;
+                const timer = setInterval(async () => {
+                    remaining--;
+
+                    if (remaining <= 0) {
+                        clearInterval(timer);
+                        await interaction.editReply('⏰ **Terminé !**');
+                        return;
+                    }
+
+                    if (remaining <= 10) {
+                        await interaction.editReply(`⏳ **${remaining}s**`);
+                    }
+                }, 1000);
+
+                return;
+            }
+
+            if (extra === 'calc') {
+                const expression = interaction.options.getString('expression', true).replace(/,/g, '.');
+
+                if (!/^[0-9+\-*/().\s]+$/.test(expression)) {
+                    await interaction.reply('❌ Expression non autorisée.');
+                    return;
+                }
+
+                try {
+                    const result = Function(`"use strict"; return (${expression})`)();
+
+                    if (!Number.isFinite(result)) {
+                        throw new Error('Résultat invalide');
+                    }
+
+                    await interaction.reply(`🧮 **${expression} = ${result}**`);
+                } catch {
+                    await interaction.reply('❌ Calcul impossible.');
+                }
+
+                return;
+            }
+
+            if (extra === 'remindme') {
+                const minutes = interaction.options.getInteger('minutes', true);
+                const texte = interaction.options.getString('texte', true);
+
+                await interaction.reply({
+                    content: `⏰ Rappel programmé dans **${minutes} minute(s)**.`,
+                    flags: MessageFlags.Ephemeral
+                });
+
+                setTimeout(async () => {
+                    await interaction.user.send(
+                        `⏰ **Rappel KTR/IA**\n${texte}`
+                    ).catch(() => {});
+
+                }, minutes * 60 * 1000);
+
+                return;
+            }
+
+            if (extra === 'serverstatus') {
+                const members = interaction.guild.members.cache;
+                const online = members.filter(m => m.presence?.status === 'online').size;
+                const idle = members.filter(m => m.presence?.status === 'idle').size;
+                const dnd = members.filter(m => m.presence?.status === 'dnd').size;
+
+                await interaction.reply(
+                    `📊 **État du serveur**\n🟢 En ligne : ${online}\n🌙 Inactifs : ${idle}\n🔴 Ne pas déranger : ${dnd}\n⚫ Hors ligne : ${Math.max(0, interaction.guild.memberCount - online - idle - dnd)}`
+                );
+
+                return;
+            }
+
+// ==========================================
             // /clear10 -> /clear100
             // ==========================================
 
