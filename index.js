@@ -10,6 +10,8 @@ const {
     Routes,
     SlashCommandBuilder,
     ActionRowBuilder,
+    ButtonBuilder,
+    ButtonStyle,
     StringSelectMenuBuilder,
     MessageFlags,
     PermissionFlagsBits,
@@ -34,7 +36,8 @@ const client = new Client({
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
-        GatewayIntentBits.GuildVoiceStates
+        GatewayIntentBits.GuildVoiceStates,
+        GatewayIntentBits.GuildMembers
     ]
 });
 
@@ -63,6 +66,24 @@ const PANEL_CHANNEL_ID = '1548642071290839140';
 
 const AI_CHANNEL_ID = '1552050085091606659';
 const AI_TIMEOUT_MS = 2 * 60 * 1000; // 2 minutes sans nouveau message
+const WELCOME_CHANNEL_NAME = 'general';
+const ECONOMY_FILE = path.join(__dirname, 'economy.json');
+const economy = fs.existsSync(ECONOMY_FILE) ? (() => { try { return JSON.parse(fs.readFileSync(ECONOMY_FILE, 'utf8')); } catch { return {}; } })() : {};
+const spamTracker = new Map();
+const welcomedUsers = new Set();
+const giveawayTimers = new Map();
+const musicPlayers = new Map();
+let play;
+try { play = require('@iamtraction/play-dl'); } catch { play = null; }
+let opusAvailable = true;
+try { require('@discordjs/opus'); } catch { opusAvailable = false; }
+
+function saveEconomy() { fs.writeFileSync(ECONOMY_FILE, JSON.stringify(economy, null, 2), 'utf8'); }
+function getBalance(id) { if (!economy[id]) economy[id] = { balance: 0, lastDaily: 0 }; return economy[id]; }
+function getGeneralChannel(guild) { return guild.channels.cache.find(c => c.type === ChannelType.GuildText && c.name === WELCOME_CHANNEL_NAME) || guild.systemChannel || guild.channels.cache.find(c => c.type === ChannelType.GuildText); }
+function parseDuration(input) { const m = String(input).trim().match(/^(\d+)\s*(s|m|h|d)$/i); if (!m) return null; const n=Number(m[1]); const mult={s:1000,m:60000,h:3600000,d:86400000}[m[2].toLowerCase()]; return n>0 ? n*mult : null; }
+function formatMoney(n) { return `${Math.max(0, Math.floor(n)).toLocaleString('fr-FR')} coins`; }
+
 
 let activeAIChannelId = AI_CHANNEL_ID;
 let aiInactivityTimer = null;
@@ -471,29 +492,45 @@ Nom Discord de l'utilisateur : ${userName}`;
 
     messages.push({ role: 'user', content: currentContent });
 
-    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${process.env.GROQ_API_KEY}`
-        },
-        body: JSON.stringify({
-            model,
-            messages,
-            temperature: 0.7,
-            max_completion_tokens: 4096
-        })
-    });
-
-    const data = await response.json().catch(() => ({}));
-
-    if (!response.ok) {
-        const detail = data?.error?.message || `HTTP ${response.status}`;
-        const retryAfter = response.headers.get('retry-after');
-        if (response.status === 429) {
-            throw new Error(`Groq API 429: limite atteinte${retryAfter ? ` — réessaie dans ${retryAfter}s` : ''}.`);
+    let response;
+    let data = {};
+    for (let attempt = 0; attempt < 2; attempt++) {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 30000);
+        try {
+            response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${process.env.GROQ_API_KEY}`
+                },
+                body: JSON.stringify({
+                    model,
+                    messages,
+                    temperature: 0.7,
+                    max_completion_tokens: 4096
+                }),
+                signal: controller.signal
+            });
+            data = await response.json().catch(() => ({}));
+        } catch (error) {
+            if (error?.name === 'AbortError') throw new Error('Groq a mis plus de 30 secondes à répondre.');
+            throw error;
+        } finally { clearTimeout(timeout); }
+        if (response.ok) break;
+        if (response.status === 429 && attempt === 0) {
+            const retry = Number(response.headers.get('retry-after') || 2);
+            await new Promise(r => setTimeout(r, Math.min(Math.max(retry, 1), 10) * 1000));
+            continue;
         }
-        throw new Error(`Groq API ${response.status}: ${detail}`);
+        break;
+    }
+
+    if (!response?.ok) {
+        const detail = data?.error?.message || `HTTP ${response?.status || 500}`;
+        const retryAfter = response?.headers?.get('retry-after');
+        if (response?.status === 429) throw new Error(`Groq est temporairement limité${retryAfter ? ` — réessaie dans ${retryAfter}s` : ''}.`);
+        throw new Error(`Groq API ${response?.status || 500}: ${detail}`);
     }
 
     const answer = data?.choices?.[0]?.message?.content?.trim();
@@ -1016,6 +1053,24 @@ const commands = [
                     .setRequired(true)
         ),
 
+
+    new SlashCommandBuilder().setName('clear').setDescription('Supprime un nombre de messages').setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages).addIntegerOption(o=>o.setName('nombre').setDescription('1 à 100').setRequired(true).setMinValue(1).setMaxValue(100)),
+    new SlashCommandBuilder().setName('announce').setDescription('Envoie une annonce').setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages).addStringOption(o=>o.setName('texte').setDescription('Texte').setRequired(true)).addChannelOption(o=>o.setName('salon').setDescription('Salon cible').setRequired(false)),
+    new SlashCommandBuilder().setName('poll').setDescription('Crée un sondage').addStringOption(o=>o.setName('question').setDescription('Question').setRequired(true)).addStringOption(o=>o.setName('option1').setDescription('Option 1').setRequired(true)).addStringOption(o=>o.setName('option2').setDescription('Option 2').setRequired(true)).addStringOption(o=>o.setName('option3').setDescription('Option 3').setRequired(false)).addStringOption(o=>o.setName('option4').setDescription('Option 4').setRequired(false)).addStringOption(o=>o.setName('option5').setDescription('Option 5').setRequired(false)),
+    new SlashCommandBuilder().setName('ticket').setDescription('Ouvre un ticket privé'),
+    new SlashCommandBuilder().setName('close').setDescription('Ferme le ticket actuel'),
+    new SlashCommandBuilder().setName('giveaway').setDescription('Lance un giveaway').setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild).addStringOption(o=>o.setName('duree').setDescription('Ex: 10m, 2h, 1d').setRequired(true)).addStringOption(o=>o.setName('prix').setDescription('Prix').setRequired(true)).addIntegerOption(o=>o.setName('gagnants').setDescription('Nombre de gagnants').setRequired(false).setMinValue(1).setMaxValue(20)),
+    new SlashCommandBuilder().setName('stats').setDescription('Affiche les statistiques du serveur'),
+    new SlashCommandBuilder().setName('balance').setDescription('Affiche ton solde').addUserOption(o=>o.setName('membre').setDescription('Membre').setRequired(false)),
+    new SlashCommandBuilder().setName('daily').setDescription('Récupère tes coins quotidiens'),
+    new SlashCommandBuilder().setName('give').setDescription('Donne des coins').addUserOption(o=>o.setName('membre').setDescription('Membre').setRequired(true)).addIntegerOption(o=>o.setName('montant').setDescription('Montant').setRequired(true).setMinValue(1).setMaxValue(1000000)),
+    new SlashCommandBuilder().setName('leaderboard').setDescription('Classement des coins'),
+    new SlashCommandBuilder().setName('play').setDescription('Joue une musique YouTube dans ton vocal').addStringOption(o=>o.setName('url').setDescription('URL YouTube').setRequired(true)),
+    new SlashCommandBuilder().setName('skip').setDescription('Arrête la musique actuelle'),
+    new SlashCommandBuilder().setName('stop').setDescription('Arrête la musique et quitte le vocal'),
+    new SlashCommandBuilder().setName('pause').setDescription('Met la musique en pause'),
+    new SlashCommandBuilder().setName('resume').setDescription('Reprend la musique'),
+    new SlashCommandBuilder().setName('volume').setDescription('Règle le volume').addIntegerOption(o=>o.setName('niveau').setDescription('1 à 100').setRequired(true).setMinValue(1).setMaxValue(100)),
     ...[
         10,
         20,
@@ -1061,7 +1116,7 @@ async function registerCommands() {
             GUILD_ID
         ),
         {
-            body: commands
+            body: [...new Map(commands.map(c => [c.name, c])).values()]
         }
     );
 
@@ -1089,11 +1144,11 @@ client.once(
                     type: 0
                 }
             ],
-            status: 'dnd'
+            status: 'online'
         });
 
         console.log(
-            '🔴 Statut : Ne pas déranger'
+            '🟢 Statut : En ligne'
         );
 
         console.log(
@@ -1188,6 +1243,24 @@ client.on(
             return;
         }
 
+        // Bienvenue automatique
+        if (message.member?.joinedTimestamp && Date.now() - message.member.joinedTimestamp < 15000 && !welcomedUsers.has(message.author.id)) {
+            welcomedUsers.add(message.author.id);
+            const welcome = getGeneralChannel(message.guild);
+            if (welcome?.isTextBased()) await welcome.send(`👋 Bienvenue ${message.author} sur **${message.guild.name}** ! Profite bien du serveur 🤖🔥`).catch(()=>{});
+        }
+
+        // Anti-spam simple : 6 messages en 8 secondes => timeout 30s
+        const now = Date.now();
+        const times = (spamTracker.get(message.author.id) || []).filter(t => now - t < 8000);
+        times.push(now); spamTracker.set(message.author.id, times);
+        if (times.length >= 6 && message.member?.moderatable) {
+            await message.member.timeout(30000, 'Anti-spam automatique').catch(()=>{});
+            spamTracker.set(message.author.id, []);
+            await message.channel.send(`🛡️ ${message.author}, ralentis un peu ! Timeout de **30 secondes** pour spam.`).catch(()=>{});
+            return;
+        }
+
         const channelId = message.channelId;
         const history = aiHistory.get(channelId);
 
@@ -1256,6 +1329,12 @@ client.on(
     async interaction => {
 
         try {
+
+            if (interaction.isButton() && interaction.customId === 'ticket_close') {
+                await interaction.reply('🔒 Fermeture du ticket...');
+                setTimeout(() => interaction.channel?.delete('Ticket fermé par bouton').catch(()=>{}), 1000);
+                return;
+            }
 
             // ==========================================
             // MENU
@@ -2658,6 +2737,93 @@ client.on(
             // ==========================================
             // /clear10 -> /clear100
             // ==========================================
+
+
+            // ==========================================
+            // NOUVELLES FONCTIONS
+            // ==========================================
+            if (interaction.commandName === 'clear') {
+                const amount = interaction.options.getInteger('nombre', true);
+                if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageMessages)) return interaction.reply({content:'❌ Permission insuffisante.', flags:MessageFlags.Ephemeral});
+                const deleted = await interaction.channel.bulkDelete(amount, true).catch(()=>null);
+                return interaction.reply({content: deleted ? `🧹 **${deleted.size}** message(s) supprimé(s).` : '❌ Impossible de supprimer les messages.', flags:MessageFlags.Ephemeral});
+            }
+
+            if (interaction.commandName === 'announce') {
+                const target = interaction.options.getChannel('salon') || interaction.channel;
+                const text = interaction.options.getString('texte', true);
+                if (!target?.isTextBased()) return interaction.reply({content:'❌ Salon invalide.', flags:MessageFlags.Ephemeral});
+                await target.send({embeds:[new EmbedBuilder().setTitle('📢 ANNONCE').setDescription(text).setColor(0x5865F2).setFooter({text:`Annonce par ${interaction.user.username}`})]});
+                return interaction.reply({content:`✅ Annonce envoyée dans ${target}.`, flags:MessageFlags.Ephemeral});
+            }
+
+            if (interaction.commandName === 'poll') {
+                const opts = [1,2,3,4,5].map(n=>interaction.options.getString(`option${n}`)).filter(Boolean);
+                const emojis=['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣'];
+                const desc = opts.map((v,i)=>`${emojis[i]} **${v}**`).join('\n');
+                const msg = await interaction.channel.send({embeds:[new EmbedBuilder().setTitle('📊 SONDAGE').setDescription(`**${interaction.options.getString('question',true)}**\n\n${desc}`).setColor(0x5865F2)]});
+                for (let i=0;i<opts.length;i++) await msg.react(emojis[i]);
+                return interaction.reply({content:'✅ Sondage créé.', flags:MessageFlags.Ephemeral});
+            }
+
+            if (interaction.commandName === 'ticket') {
+                const existing = interaction.guild.channels.cache.find(c=>c.name===`ticket-${interaction.user.id}`);
+                if (existing) return interaction.reply({content:`❌ Tu as déjà un ticket : ${existing}`, flags:MessageFlags.Ephemeral});
+                const channel = await interaction.guild.channels.create({name:`ticket-${interaction.user.id}`, type:ChannelType.GuildText, permissionOverwrites:[
+                    {id:interaction.guild.roles.everyone.id,deny:['ViewChannel']},
+                    {id:interaction.user.id,allow:['ViewChannel','SendMessages','ReadMessageHistory']},
+                    {id:interaction.guild.members.me.id,allow:['ViewChannel','SendMessages','ManageChannels','ReadMessageHistory']}
+                ],reason:'Création ticket'});
+                const row=new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('ticket_close').setLabel('Fermer le ticket').setStyle(ButtonStyle.Danger));
+                await channel.send({content:`🎫 ${interaction.user} bienvenue dans ton ticket !`,components:[row]});
+                return interaction.reply({content:`✅ Ticket créé : ${channel}`, flags:MessageFlags.Ephemeral});
+            }
+
+            if (interaction.commandName === 'close') {
+                if (!interaction.channel?.name?.startsWith('ticket-')) return interaction.reply({content:'❌ Cette commande doit être utilisée dans un ticket.', flags:MessageFlags.Ephemeral});
+                await interaction.reply({content:'🔒 Fermeture du ticket...'}); setTimeout(()=>interaction.channel.delete('Ticket fermé').catch(()=>{}),1500); return;
+            }
+
+            if (interaction.commandName === 'giveaway') {
+                const duration=parseDuration(interaction.options.getString('duree',true));
+                if (!duration) return interaction.reply({content:'❌ Durée invalide. Exemple : `10m`, `2h`, `1d`.',flags:MessageFlags.Ephemeral});
+                const prize=interaction.options.getString('prix',true); const winners=interaction.options.getInteger('gagnants')||1;
+                const end=Date.now()+duration;
+                const msg=await interaction.channel.send({embeds:[new EmbedBuilder().setTitle('🎉 GIVEAWAY').setDescription(`🎁 **${prize}**\n\n👑 Gagnant(s) : **${winners}**\n⏰ Fin : <t:${Math.floor(end/1000)}:R>\n\nRéagissez avec 🎉 pour participer !`).setColor(0xF1C40F)]});
+                await msg.react('🎉');
+                const timer=setTimeout(async()=>{try{const fresh=await interaction.channel.messages.fetch(msg.id);const users=await fresh.reactions.cache.get('🎉')?.users.fetch();const participants=[...users.values()].filter(u=>!u.bot);const chosen=[];while(chosen.length<Math.min(winners,participants.length)){const u=participants.splice(Math.floor(Math.random()*participants.length),1)[0];if(u)chosen.push(u);}await interaction.channel.send(chosen.length?`🎉 **Giveaway terminé !** Félicitations : ${chosen.map(u=>u).join(', ')} — **${prize}** !`:`🎉 Giveaway terminé, aucun participant.`);}catch(e){console.error('Giveaway:',e)} giveawayTimers.delete(msg.id);},duration); giveawayTimers.set(msg.id,timer);
+                return interaction.reply({content:'✅ Giveaway lancé.',flags:MessageFlags.Ephemeral});
+            }
+
+            if (interaction.commandName === 'stats') {
+                const g=interaction.guild; const text=g.channels.cache.filter(c=>c.type===ChannelType.GuildText).size; const voice=g.channels.cache.filter(c=>c.isVoiceBased()).size;
+                return interaction.reply({embeds:[new EmbedBuilder().setTitle(`📊 Statistiques — ${g.name}`).addFields({name:'👥 Membres',value:String(g.memberCount),inline:true},{name:'💬 Salons texte',value:String(text),inline:true},{name:'🔊 Salons vocaux',value:String(voice),inline:true},{name:'🚀 Boosts',value:String(g.premiumSubscriptionCount||0),inline:true},{name:'🤖 Bots',value:String(g.members.cache.filter(m=>m.user.bot).size),inline:true}).setColor(0x5865F2)]});
+            }
+
+            if (interaction.commandName === 'balance') { const u=interaction.options.getUser('membre')||interaction.user; return interaction.reply(`💰 **${u.username}** : **${formatMoney(getBalance(u.id).balance)}**`); }
+            if (interaction.commandName === 'daily') { const b=getBalance(interaction.user.id); if(Date.now()-b.lastDaily<86400000) return interaction.reply({content:`⏳ Reviens <t:${Math.floor((b.lastDaily+86400000)/1000)}:R>.`,flags:MessageFlags.Ephemeral}); b.balance+=500; b.lastDaily=Date.now(); saveEconomy(); return interaction.reply(`🎁 **+500 coins** ! Tu as maintenant **${formatMoney(b.balance)}**.`); }
+            if (interaction.commandName === 'give') { const target=interaction.options.getUser('membre',true); const amount=interaction.options.getInteger('montant',true); const from=getBalance(interaction.user.id); if(target.bot||target.id===interaction.user.id)return interaction.reply({content:'❌ Membre invalide.',flags:MessageFlags.Ephemeral}); if(from.balance<amount)return interaction.reply({content:'❌ Tu n’as pas assez de coins.',flags:MessageFlags.Ephemeral}); from.balance-=amount;getBalance(target.id).balance+=amount;saveEconomy();return interaction.reply(`💸 **${interaction.user.username}** a donné **${amount} coins** à **${target.username}**.`); }
+            if (interaction.commandName === 'leaderboard') { const top=Object.entries(economy).sort((a,b)=>(b[1].balance||0)-(a[1].balance||0)).slice(0,10); const lines=await Promise.all(top.map(async([id,b],i)=>{const u=await client.users.fetch(id).catch(()=>null);return `${i+1}. **${u?.username||id}** — ${formatMoney(b.balance)}`;})); return interaction.reply(`🏆 **Classement**\n${lines.length?lines.join('\n'):'Aucun compte.'}`); }
+
+            if (['play','skip','stop','pause','resume','volume'].includes(interaction.commandName)) {
+                if (!play || !opusAvailable) return interaction.reply({content:'❌ Le module musique n’est pas disponible sur cette installation.',flags:MessageFlags.Ephemeral});
+                const memberChannel=interaction.member?.voice?.channel; if(interaction.commandName==='play' && !memberChannel)return interaction.reply({content:'❌ Rejoins un vocal.',flags:MessageFlags.Ephemeral});
+                let state=musicPlayers.get(interaction.guild.id);
+                if(interaction.commandName==='play'){
+                    await interaction.deferReply();
+                    const url=interaction.options.getString('url',true); const info=await play.video_basic_info(url); const stream=await play.stream(url,{quality:2});
+                    let connection=getVoiceConnection(interaction.guild.id); if(!connection) connection=connectToVoice(memberChannel);
+                    const {createAudioPlayer,createAudioResource,AudioPlayerStatus,StreamType}=require('@discordjs/voice');
+                    if(!state){state={player:createAudioPlayer(),volume:1};musicPlayers.set(interaction.guild.id,state);connection.subscribe(state.player);state.player.on('error',e=>console.error('Music:',e));}
+                    const resource=createAudioResource(stream.stream,{inputType:stream.type||StreamType.Arbitrary,inlineVolume:true}); resource.volume?.setVolume(state.volume); state.player.play(resource);
+                    return interaction.editReply(`🎵 **${info.video_details.title}** est en lecture.`);
+                }
+                state=musicPlayers.get(interaction.guild.id); if(!state)return interaction.reply({content:'❌ Aucune musique.',flags:MessageFlags.Ephemeral});
+                if(interaction.commandName==='skip'||interaction.commandName==='stop'){state.player.stop();if(interaction.commandName==='stop'){getVoiceConnection(interaction.guild.id)?.destroy();musicPlayers.delete(interaction.guild.id);}return interaction.reply('⏹️ Musique arrêtée.');}
+                if(interaction.commandName==='pause'){state.player.pause();return interaction.reply('⏸️ Pause.');}
+                if(interaction.commandName==='resume'){state.player.unpause();return interaction.reply('▶️ Reprise.');}
+                if(interaction.commandName==='volume'){state.volume=interaction.options.getInteger('niveau',true)/100;const resource=state.player.state?.resource;if(resource?.volume)resource.volume.setVolume(state.volume);return interaction.reply(`🔊 Volume : **${Math.round(state.volume*100)}%**`);}
+            }
 
             const clearMatch =
                 interaction.commandName.match(
